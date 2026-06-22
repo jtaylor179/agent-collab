@@ -21,10 +21,39 @@ their reply back — atomically, with idempotency, lease fencing, and bounded re
 | [INSTALL.md](INSTALL.md) | Installation instructions |
 | [sync.sh](sync.sh) | Push the repo version into your active local installs |
 
-## Quick start
+## Slash commands (Claude Code / Cowork / Codex)
+
+Once the plugin is installed (see [INSTALL.md](INSTALL.md)), drive everything with slash
+commands — no raw CLI needed:
+
+| Command | What it does |
+|---|---|
+| `/collab-review <file>` | One step: create a project, snapshot the file, broadcast a review request (then offers to wait) |
+| `/collab-start` | Start a project for review (prompts for the file/focus) |
+| `/collab-check` | Drain your inbox, reconcile feedback; offers to wait if idle |
+| `/collab-wait` | Stay in this session and block for the next incoming message |
+| `/collab-status` | State, pending per agent, stalled items, open threads |
+| `/collab-list` | List all projects under your `COLLAB_ROOT` |
+| `/collab-delete` | Delete a project (with confirmation) |
+
+### Typical flow
+
+Set `COLLAB_AGENT` (`claude-1` / `codex-1`) and `COLLAB_ROOT=$HOME/.collab` once per
+terminal, then:
+
+1. **Claude:** `/collab-review ./spec.md` — broadcasts the review request and offers to wait.
+2. **Codex:** say `review collab project <name>` (or run the hands-off watcher).
+3. **Claude:** `/collab-wait` (or answer "yes, wait") — pulls the review, reconciles with an
+   accept/reject ledger, and converges. Or `/collab-check` whenever you're ready.
+
+Full copy-paste prompts: [plugins/agent-collab/QUICKSTART.md](plugins/agent-collab/QUICKSTART.md).
+
+## Quick start (raw CLI)
+
+If you'd rather call the bus directly (or from a plain terminal):
 
 ```bash
-export COLLAB_ROOT=./.collab
+export COLLAB_ROOT=$HOME/.collab
 python3 collab/collab.py start --project A --topic "queue schema" \
     --goal "agree design" --agent claude-1
 ```
