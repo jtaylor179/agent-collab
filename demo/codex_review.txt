@@ -1,0 +1,5 @@
+Strongest objection: fixed-window allows up to 2x the limit across a window boundary
+(1000 reqs at 0:59 + 1000 at 1:00 = 2000 in ~1s). Use a token bucket or sliding-window
+log instead. Second: INCR-then-EXPIRE is a race — if the process dies between them the
+key never expires and the caller is locked out. Make it atomic (Lua, or SET key with
+NX+EXPIRE on first hit). Otherwise the per-key model and 1000/min target are fine.

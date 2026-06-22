@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# collab bus runtime data (created wherever COLLAB_ROOT points; default ./.collab)
+.collab/
+.collab2/
+
+# demo runtime output (recreated by demo/run_*.sh)
+demo/.run/
+demo/.run-watcher/
+demo/_probe/
+
+# SQLite runtime databases
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# OS cruft
+.DS_Store

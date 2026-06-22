@@ -1,0 +1,17 @@
+{
+  "name": "agent-collab-marketplace",
+  "owner": {
+    "name": "Jeff Taylor"
+  },
+  "metadata": {
+    "description": "Local marketplace for the agent-collab plugin."
+  },
+  "plugins": [
+    {
+      "name": "agent-collab",
+      "source": "./plugins/agent-collab",
+      "description": "Collaborate with other AI agents (Codex, Copilot) on a shared spec or codebase through a durable message bus.",
+      "version": "0.2.11"
+    }
+  ]
+}

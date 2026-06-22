@@ -1,0 +1,5 @@
+Proposal  + ledger:
+- Boundary-burst objection: ACCEPTED. Switched fixed-window -> token bucket.
+- INCR/EXPIRE race: ACCEPTED. Now a single atomic Redis Lua script.
+- Per-endpoint limits: REJECTED for v1 (out of scope; one global per-key limit ships
+  first, per-endpoint is a fast-follow). Reason: keeps v1 shippable.
