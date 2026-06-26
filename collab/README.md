@@ -15,6 +15,7 @@ dir (`collab.db` + a content-hashed `blobs/` store).
 | `join` | attach as a reviewer |
 | `post` | post a message (`review_request`, `question`, `proposal`, `rebuttal`, `response`) |
 | `poll` | list pending messages for an agent (peek, no claim) |
+| `inbox` | human/agent-friendly view of YOUR pending actionable messages (sender, type, thread, one-line summary); `--drain` claim+acks them all to clear an already-handled backlog |
 | `claim` | atomically claim the next pending message; returns a `claim_token` |
 | `complete` | **atomic**: post a reply **and** ack the claimed message in one transaction |
 | `ack` / `extend` | finish / heartbeat-extend a claimed message (fenced by `claim_token`) |
@@ -27,6 +28,34 @@ Routing: `--to broadcast` fans out one inbox row per reviewer (independent opini
 `--to <agent>` is a single-handler work item. Replies via `complete` default to
 reply-to-sender. Only actionable types create inbox rows; `decision`/`status`/
 `heartbeat` are log-only.
+
+## Presence & ergonomics
+
+The bus is durable but **passive** — an agent only drains its inbox while its process
+is actively polling (or running `watch`). To make "is the other agent online?" a fact
+instead of guesswork, and to catch the two most common footguns:
+
+- **`status` reports presence per participant** — `online` (heartbeat <2 min), `idle`
+  (<30 min), `offline` (older), or `unknown` (never seen), plus `last_seen_age_s`.
+- **`post` warns on directed footguns** — sending a *log-only* type (`status` /
+  `decision` / `heartbeat`) `--to <agent>` returns a `warning` that it creates **no
+  inbox row** (the recipient is never prompted; use `review_request`/`question`/
+  `response`). Sending an *actionable* message to an **offline/idle** agent warns it
+  won't be seen until that agent re-attaches or runs `watch` (the message is still
+  queued durably and delivers when it returns).
+- **`inbox` / `inbox --drain`** — a per-turn "what needs my attention?" read, and a
+  one-shot way to clear a backlog you've already handled out-of-band so the pending
+  count reflects reality (a plain `ack` needs a `claim_token`; `--drain` does the
+  claim for you).
+- **`log` filters** — `--since <seq>`, `--actionable`, `--to <agent>`, `--from <agent>`
+  replace hand-rolled "messages since N addressed to me" filtering.
+
+```bash
+collab status  --project A                  # who's online/idle/offline
+collab inbox   --project A --agent codex-1   # my pending actionable messages
+collab inbox   --project A --agent codex-1 --drain   # clear handled backlog
+collab log     --project A --since 40 --actionable --to codex-1
+```
 
 ## Quick start
 
@@ -74,18 +103,34 @@ and stalled surfacing via `status`/`log`). **24/24 passing.**
 
 `watch` is the answer to "can the other agent run a daemon": a small loop *outside*
 the agent polls the bus, claims work, invokes the agent **single-shot** with the
-claimed message fed on **stdin** (argv list — never interpolated into a shell, so no
-injection), and posts the agent's stdout back as a response. A background heartbeat
-extends the lease while a long review runs, so it isn't falsely redelivered.
+claimed message (argv list — never interpolated into a shell, so no injection), and
+posts the agent's stdout back as a response. A background heartbeat extends the lease
+while a long review runs, so it isn't falsely redelivered.
+
+**How the payload reaches the agent — stdin by default, or `{}` as an argument.**
+By default the message is fed on **stdin** (what `codex exec` reads). Some CLIs
+instead want the prompt as an *argument* — put a `{}` token in the exec argv and the
+payload is substituted there (and nothing is sent on stdin):
 
 ```bash
-# real reviewers (the agent's own collab skill formats the stdin payload into a reply):
-python3 collab.py watch --project A --agent codex-1   --exec codex exec
-python3 collab.py watch --project A --agent copilot-1 --exec copilot -p
+# Codex — reads the prompt on stdin (default):
+python3 collab.py watch --project A --agent codex-1 --exec codex exec
 
-# everything after --exec is the agent argv; the message arrives on stdin.
-# --once / --max N / --idle-exit control lifetime; --lease-min sets the lease.
+# GitHub Copilot — wants the prompt as the -p arg AND needs --allow-all-tools for
+# non-interactive mode. Use the {} placeholder (--model is optional):
+python3 collab.py watch --project A --agent copilot-1 \
+  --exec copilot --allow-all-tools --model gpt-5.4 -p {}
+# (or the bundled adapter, which sets --allow-all-tools + --model gpt-5.4 [override
+#  with COPILOT_MODEL] and reads stdin:
+#  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo )
+
+# everything after --exec is the agent argv; --once / --max N / --idle-exit control
+# lifetime; --lease-min sets the lease; --agent-timeout bounds a hung run.
 ```
+
+> ⚠️ `--exec copilot -p` (no `{}`) does **not** work: the watcher pipes the message on
+> stdin, but `copilot -p` expects the prompt as the flag's value, so it exits with
+> "option '-p, --prompt <text>' argument missing" before reading stdin. Use `-p {}`.
 
 The watcher auto-joins the agent as a reviewer (so it gets backfilled any open
 broadcast) and loops until told to stop. Robustness:

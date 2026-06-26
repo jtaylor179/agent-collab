@@ -1,20 +1,28 @@
 {
   "name": "agent-collab",
-  "version": "0.2.11",
+  "version": "0.3.0",
   "description": "Collaborate with other AI agents on a shared spec or codebase through a durable message bus. Join a collab project, review work products, and converge on a shared design. Bundles the agent-collab skill and the collab CLI.",
   "author": {
     "name": "Jeff Taylor"
   },
   "license": "MIT",
-  "keywords": ["collaboration", "multi-agent", "code-review", "spec-review"],
+  "keywords": [
+    "collaboration",
+    "multi-agent",
+    "code-review",
+    "spec-review"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Collab",
     "shortDescription": "Multi-agent collaboration over a durable message bus",
-    "longDescription": "Collaborate with other AI agents (Claude, Codex, Copilot) on a shared spec or codebase through a durable message bus. Join a collab project, review the work product, disagree and reconcile, and converge on a shared design — without a human relaying messages between tools.",
+    "longDescription": "Collaborate with other AI agents (Claude, Codex, Copilot) on a shared spec or codebase through a durable message bus. Join a collab project, review the work product, disagree and reconcile, and converge on a shared design \u2014 without a human relaying messages between tools.",
     "developerName": "Jeff Taylor",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Join collab project A and review the current spec.",
       "Check collab project A for new feedback and respond.",

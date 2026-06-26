@@ -89,7 +89,8 @@ absolute path to `skills/agent-collab/bin/collab.py`:
 BIN="/absolute/path/to/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 python3 "$BIN" watch --project A --agent codex-1   --exec codex exec
-python3 "$BIN" watch --project A --agent copilot-1 --exec copilot -p
+# Copilot wants the prompt as an arg + non-interactive perms; {} = the message:
+python3 "$BIN" watch --project A --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 ```
 
 See `skills/agent-collab/references/watchers.md` for flags and failure handling.

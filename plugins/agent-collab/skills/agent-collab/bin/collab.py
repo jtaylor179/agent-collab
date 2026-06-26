@@ -94,6 +94,38 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
+# Presence thresholds (seconds). An agent only drains its inbox while its process is
+# actively polling, so a stale last_heartbeat means it won't see a directed message
+# until it re-attaches or runs `watch`. Surfacing this turns "is the other agent
+# online?" from guesswork into a field.
+PRESENCE_ONLINE_S = 120     # heartbeat within 2 min -> actively attached
+PRESENCE_IDLE_S = 1800      # within 30 min -> recently seen, may not be polling now
+
+
+def _age_seconds(ts):
+    """Age in seconds of an ISO-8601 'now_iso()' timestamp, or None if unparseable."""
+    if not ts:
+        return None
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - t).total_seconds())
+
+
+def presence(last_heartbeat):
+    """Classify an agent's liveness from its last_heartbeat:
+    'online' (<2 min), 'idle' (<30 min), 'offline' (older), or 'unknown' (no/bad ts)."""
+    age = _age_seconds(last_heartbeat)
+    if age is None:
+        return "unknown", None
+    if age <= PRESENCE_ONLINE_S:
+        return "online", round(age, 1)
+    if age <= PRESENCE_IDLE_S:
+        return "idle", round(age, 1)
+    return "offline", round(age, 1)
+
+
 class CollabError(Exception):
     """User-facing error (lease lost, unknown project, etc.)."""
 
@@ -184,25 +216,23 @@ class Store:
         p = self.get_project(project)
         ts = now_iso()
         backfilled = 0
-        # Never silently change an existing participant's role. If the initiator tries
-        # to "join" as a reviewer (the classic same-identity-on-both-sides mistake),
-        # keep them as initiator and surface a warning instead of demoting them — which
-        # would otherwise hide the collision from doctor.
         existing = self.conn.execute(
             "SELECT role FROM participants WHERE project=? AND agent_id=?",
             (project, agent),
         ).fetchone()
-        warning = None
-        if existing:
-            effective_role = existing["role"]
-            if existing["role"] == "initiator" and role == "reviewer":
-                warning = (
-                    f"'{agent}' is already the initiator of '{project}'. One agent cannot "
-                    "be both initiator and reviewer — the reviewer must be a DIFFERENT "
-                    "agent id (e.g. codex-1) with its own COLLAB_AGENT, on the same "
-                    "COLLAB_ROOT.")
-        else:
-            effective_role = role
+        # HARD STOP on the #1 setup mistake: a reviewer "joining" under the id that is
+        # already the project's initiator means two different tools share one agent id
+        # (e.g. both defaulted to claude-1). Nothing would route — refuse loudly instead
+        # of registering a self-collision that looks fine until wait/claim is always empty.
+        if existing and existing["role"] == "initiator" and role == "reviewer":
+            raise CollabError(
+                f"'{agent}' is already the INITIATOR of '{project}', so it cannot also "
+                "join as a reviewer. This almost always means two tools are using the "
+                f"SAME agent id ('{agent}'). Give the reviewer a DISTINCT id: set "
+                "COLLAB_AGENT (claude-1 for Claude, codex-1 for Codex, copilot-1 for "
+                "Copilot) in the reviewer's environment, then join again. If you ARE the "
+                "initiator, you don't need to join — just check the project.")
+        effective_role = existing["role"] if existing else role
         with self.write_tx():
             self.conn.execute(
                 "INSERT INTO participants(project,agent_id,role,last_heartbeat) "
@@ -229,11 +259,8 @@ class Store:
                         (r["message_id"], agent),
                     )
                     backfilled += 1
-        res = {"project": project, "agent": agent, "role": effective_role,
-               "backfilled": backfilled}
-        if warning:
-            res["warning"] = warning
-        return res
+        return {"project": project, "agent": agent, "role": effective_role,
+                "backfilled": backfilled}
 
     def participants(self, project, role=None):
         q = "SELECT * FROM participants WHERE project=?"
@@ -249,6 +276,13 @@ class Store:
                 "UPDATE participants SET last_heartbeat=? WHERE project=? AND agent_id=?",
                 (now_iso(), project, agent),
             )
+
+    def _heartbeat_of(self, project, agent):
+        row = self.conn.execute(
+            "SELECT last_heartbeat FROM participants WHERE project=? AND agent_id=?",
+            (project, agent),
+        ).fetchone()
+        return row["last_heartbeat"] if row else None
 
     def set_state(self, project, state):
         with self.write_tx():
@@ -384,6 +418,10 @@ class Store:
         self.get_project(project)
         if mtype not in MSG_TYPES:
             raise CollabError(f"unknown message type: {mtype}")
+        # Activity IS presence: posting means the sender is actively attached, so its
+        # last_heartbeat tracks real liveness (without this, an agent that posts all day
+        # but never calls `heartbeat` reads as "offline").
+        self.heartbeat(project, from_agent)
         with self.write_tx():
             mid, dup = self._insert_message(
                 project, from_agent, to_agent, mtype, body, **kw)
@@ -393,6 +431,24 @@ class Store:
                 res["warning"] = (
                     "no reviewers have joined yet — this broadcast has zero recipients "
                     "right now. Reviewers who join later are backfilled automatically.")
+        elif to_agent not in ("broadcast", from_agent) and not dup:
+            # Directed message footguns: (1) a log-only type creates no inbox row, so the
+            # recipient is never prompted; (2) an actionable message to an agent that is
+            # not actively attached will sit undelivered until it returns.
+            if mtype not in ACTIONABLE:
+                res["warning"] = (
+                    f"'{mtype}' is a log-only type: it does NOT create an inbox row, so "
+                    f"{to_agent} will not be prompted to act on it. Use review_request / "
+                    f"question / response (with --parent) for anything that needs a reply.")
+            else:
+                pres, age = presence(self._heartbeat_of(project, to_agent))
+                if pres in ("idle", "offline"):
+                    res["warning"] = (
+                        f"{to_agent} looks {pres} (last seen ~{int((age or 0) // 60)} min "
+                        f"ago) — it will not see this until it re-attaches or runs "
+                        f"`collab watch`. The message is queued durably and delivers when "
+                        f"it returns.")
+                    res["recipient_presence"] = pres
         return res
 
     def review(self, project, agent, file_path, name=None, topic="", goal="",
@@ -422,7 +478,9 @@ class Store:
         return out
 
     def poll(self, project, agent):
-        """List pending inbox rows for agent (peek, no claim)."""
+        """List pending inbox rows for agent (peek, no claim). Checking in counts as
+        activity, so this refreshes the caller's presence heartbeat."""
+        self.heartbeat(project, agent)
         return self.conn.execute(
             "SELECT i.*, m.seq, m.type, m.from_agent, m.round, m.parent_message_id "
             "FROM inbox i JOIN messages m USING(message_id) "
@@ -430,6 +488,46 @@ class Store:
             "ORDER BY m.seq",
             (agent, project),
         ).fetchall()
+
+    def inbox_view(self, project, agent):
+        """A human/agent-friendly inbox: pending actionable messages addressed to me,
+        each with sender, type, parent thread, and a one-line summary. Unlike `poll`
+        (a raw peek), this is shaped for a per-turn 'what needs my attention?' read."""
+        self.get_project(project)
+        self.heartbeat(project, agent)  # checking inbox = active presence
+        rows = self.conn.execute(
+            "SELECT m.seq, m.message_id, m.type, m.from_agent, m.round, "
+            "m.parent_message_id, m.body, m.created_at "
+            "FROM inbox i JOIN messages m USING(message_id) "
+            "WHERE i.recipient=? AND m.project=? AND i.status='pending' ORDER BY m.seq",
+            (agent, project),
+        ).fetchall()
+        items = []
+        for r in rows:
+            body = (r["body"] or "").replace("\n", " ")
+            items.append({
+                "seq": r["seq"], "message_id": r["message_id"], "type": r["type"],
+                "from": r["from_agent"], "round": r["round"],
+                "parent": r["parent_message_id"],
+                "summary": body[:140] + ("..." if len(body) > 140 else ""),
+            })
+        return {"agent": agent, "pending": len(items), "items": items}
+
+    def inbox_drain(self, project, agent, limit=10000):
+        """Mark every pending inbox row done WITHOUT replying — claim+ack each in turn.
+        Use to clear a backlog of messages you've already handled out-of-band so the
+        'pending' count reflects reality. (A plain `ack` needs a claim_token; this does
+        the claim for you.)"""
+        self.get_project(project)
+        self.heartbeat(project, agent)
+        drained = []
+        for _ in range(limit):
+            got = self._claim_once(project, agent)
+            if not got:
+                break
+            self.ack(project, agent, got["message_id"], got["claim_token"])
+            drained.append(got["message_id"])
+        return {"drained": len(drained), "message_ids": drained}
 
     def sweep(self, project):
         """Return expired claims to pending. Runs inline before each claim."""
@@ -449,6 +547,7 @@ class Store:
         """Claim the next pending inbox row for agent. If wait>0, block up to `wait`
         seconds (polling every poll_interval) until something is claimable, then return
         it; return None on timeout. wait=0 is the original non-blocking behavior."""
+        self.heartbeat(project, agent)  # claiming = active presence
         got = self._claim_once(project, agent, lease_min)
         if got is not None or wait <= 0:
             return got
@@ -615,11 +714,21 @@ class Store:
         return {"message_id": mid, "duplicate": dup, "state": "converged",
                 "closed_deliveries": cur.rowcount}
 
-    def log(self, project, since_seq=0):
-        return self.conn.execute(
-            "SELECT * FROM messages WHERE project=? AND seq>? ORDER BY seq",
-            (project, since_seq),
-        ).fetchall()
+    def log(self, project, since_seq=0, actionable_only=False, to_agent=None,
+            from_agent=None):
+        q = "SELECT * FROM messages WHERE project=? AND seq>?"
+        params = [project, since_seq]
+        if actionable_only:
+            q += " AND type IN (%s)" % ",".join("?" * len(ACTIONABLE))
+            params += list(ACTIONABLE)
+        if to_agent:
+            q += " AND to_agent=?"
+            params.append(to_agent)
+        if from_agent:
+            q += " AND from_agent=?"
+            params.append(from_agent)
+        q += " ORDER BY seq"
+        return self.conn.execute(q, params).fetchall()
 
     def status(self, project):
         p = self.get_project(project)
@@ -661,8 +770,11 @@ class Store:
             "round_budget": p["max_rounds"],
             "messages": msg_count,
             "participants": [
-                {"agent": r["agent_id"], "role": r["role"],
-                 "last_heartbeat": r["last_heartbeat"]} for r in parts
+                dict(zip(
+                    ("agent", "role", "last_heartbeat", "presence", "last_seen_age_s"),
+                    (r["agent_id"], r["role"], r["last_heartbeat"],
+                     *presence(r["last_heartbeat"])),
+                )) for r in parts
             ],
             "pending": {r["recipient"]: r["n"] for r in pending},
             "stalled": [
@@ -798,15 +910,33 @@ def _agent_payload(store, project, agent, claimed):
     }, indent=2)
 
 
+PAYLOAD_PLACEHOLDER = "{}"
+
+
+def _bind_payload(exec_argv, payload):
+    """Decide how the payload reaches the agent. Default: on STDIN (codex exec, and
+    any CLI that reads a piped prompt). But CLIs like GitHub Copilot (`copilot -p
+    <text>`) want the prompt as an ARGUMENT — so if any token contains the `{}`
+    placeholder, substitute the payload there and send NO stdin. Returns
+    (argv, stdin_text_or_None)."""
+    if any(PAYLOAD_PLACEHOLDER in a for a in exec_argv):
+        argv = [a.replace(PAYLOAD_PLACEHOLDER, payload) for a in exec_argv]
+        return argv, None
+    return list(exec_argv), payload
+
+
 def _run_agent_with_heartbeat(store, project, agent, claimed, exec_argv,
                               payload, lease_min, agent_timeout=None):
-    """Invoke the agent (argv list) with the payload on stdin, extending the lease
-    in a background thread so a long review is not falsely redelivered. Kills the
-    agent if it exceeds agent_timeout. Returns (returncode, stdout, stderr)."""
+    """Invoke the agent (argv list), extending the lease in a background thread so a
+    long review is not falsely redelivered. The payload reaches the agent on stdin by
+    default, or as an argument when exec_argv contains the `{}` placeholder (see
+    _bind_payload). Kills the agent if it exceeds agent_timeout. Returns
+    (returncode, stdout, stderr)."""
     import subprocess
     import threading
 
     cm, tok = claimed["claim_message_id"], claimed["claim_token"]
+    argv, stdin_text = _bind_payload(exec_argv, payload)
     stop = threading.Event()
 
     def beat():
@@ -826,10 +956,10 @@ def _run_agent_with_heartbeat(store, project, agent, claimed, exec_argv,
     t.start()
     try:
         proc = subprocess.Popen(
-            exec_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True)
         try:
-            out, err = proc.communicate(input=payload, timeout=agent_timeout)
+            out, err = proc.communicate(input=stdin_text, timeout=agent_timeout)
             return proc.returncode, out, err
         except subprocess.TimeoutExpired:
             # a hung agent must not hold the lease forever (Codex finding #1):
@@ -856,7 +986,12 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
     and skipped rather than crashing the daemon."""
     store.get_project(project)
     if agent not in {r["agent_id"] for r in store.participants(project)}:
-        store.join(project, agent)  # auto-join as reviewer (idempotent)
+        try:
+            store.join(project, agent)  # auto-join as reviewer (idempotent)
+        except CollabError as e:
+            # almost always the same-id-as-initiator collision; surface and stop
+            print(f"[watch] cannot start: {e}", file=log_fh, flush=True)
+            return 0
     processed = 0
     while True:
         claimed = store.claim(project, agent, lease_min)
@@ -1075,10 +1210,25 @@ def build_parser():
 
     s = sub.add_parser("log", help="print message log")
     s.add_argument("--project", required=True)
-    s.add_argument("--since", type=int, default=0)
+    s.add_argument("--since", type=int, default=0,
+                   help="only messages with seq > this (replaces hand-rolled filtering)")
+    s.add_argument("--actionable", action="store_true",
+                   help="only review_request/question/response/rebuttal/proposal")
+    s.add_argument("--to", dest="to_agent", help="only messages addressed to this agent")
+    s.add_argument("--from", dest="from_agent", help="only messages from this agent")
     s.add_argument("--follow", action="store_true", help="tail new messages live")
     s.add_argument("--interval", type=float, default=2.0,
                    help="poll seconds when --follow (default 2)")
+
+    s = sub.add_parser("inbox",
+                       help="show or drain YOUR pending inbox (actionable messages "
+                            "addressed to you)")
+    s.add_argument("--project", required=True)
+    s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
+                   help="agent id; defaults to $COLLAB_AGENT")
+    s.add_argument("--drain", action="store_true",
+                   help="claim+ack all pending (mark read) without replying — clears an "
+                        "already-handled backlog so 'pending' reflects reality")
 
     s = sub.add_parser("projects",
                        help="list all projects under this COLLAB_ROOT")
@@ -1147,7 +1297,7 @@ def main(argv=None):
     # doctor intentionally omitted: it must run even when identity is missing, since
     # diagnosing a missing/duplicate COLLAB_AGENT is one of its jobs.
     NEED_AGENT = {"start", "join", "poll", "claim", "ack", "extend", "heartbeat",
-                  "watch", "review"}
+                  "watch", "review", "inbox"}
     NEED_FROM = {"post", "complete", "decide"}
     if args.cmd in NEED_AGENT and not getattr(args, "agent", None):
         print(json.dumps({"error": "no agent identity: pass --agent or set "
@@ -1177,6 +1327,11 @@ def main(argv=None):
                              idempotency_key=args.idem, role=args.role))
         elif cmd == "poll":
             _emit(store.poll(args.project, args.agent))
+        elif cmd == "inbox":
+            if args.drain:
+                _emit(store.inbox_drain(args.project, args.agent))
+            else:
+                _emit(store.inbox_view(args.project, args.agent))
         elif cmd == "claim":
             res = store.claim(args.project, args.agent, args.lease_min,
                               wait=args.wait, poll_interval=args.poll_interval)
@@ -1226,7 +1381,10 @@ def main(argv=None):
                 since = args.since
                 try:
                     while True:
-                        for r in store.log(args.project, since):
+                        for r in store.log(args.project, since,
+                                           actionable_only=args.actionable,
+                                           to_agent=args.to_agent,
+                                           from_agent=args.from_agent):
                             body = (r["body"] or "").replace("\n", " ")
                             if len(body) > 70:
                                 body = body[:67] + "..."
@@ -1239,7 +1397,9 @@ def main(argv=None):
                 except KeyboardInterrupt:
                     pass
             else:
-                _emit(store.log(args.project, args.since))
+                _emit(store.log(args.project, args.since,
+                                actionable_only=args.actionable,
+                                to_agent=args.to_agent, from_agent=args.from_agent))
         elif cmd == "projects":
             _emit(store.list_projects())
         elif cmd == "delete":

@@ -14,15 +14,26 @@ description: >-
 You collaborate with other AI agents over a shared, durable message bus so a human
 no longer has to relay messages between tools.
 
-## Your identity (read this first)
+## Your identity (read this first — the #1 thing to get right)
 
-You act as **`claude-1`** unless `$COLLAB_AGENT` is set, in which case use that. Every
-participant in a project MUST have a **distinct** id — Claude is `claude-1`, Codex is
-`codex-1`, Copilot is `copilot-1`. If two agents share an id, no work routes between
-them and "check" will always find nothing (the most common setup mistake). State your
-identity in your first reply each session, e.g. *"Acting as claude-1 on project X."*
-The CLI reads `$COLLAB_AGENT` automatically, so you can omit `--agent`/`--from` when it
-is set; otherwise pass `--agent claude-1` (and `--from claude-1`) explicitly.
+Every participant in a project MUST have a **distinct** id, and the id must match *which
+tool you are*:
+
+- If `$COLLAB_AGENT` is set, use it verbatim.
+- If it is NOT set, choose by your tool — **`claude-1` if you are Claude, `codex-1` if
+  you are Codex, `copilot-1` if you are Copilot** — and tell the user which you chose.
+  Do **not** blindly default to `claude-1` if you are not Claude; that's how two tools
+  collide on one id.
+
+State your identity in your first reply, e.g. *"Acting as codex-1 on project X."* The
+CLI reads `$COLLAB_AGENT` automatically, so you can omit `--agent`/`--from` when it's
+set; otherwise pass `--agent <your-id>` explicitly.
+
+**Before you join/post/claim, run `doctor --project X` and read its hints.** If two
+tools share an id, nothing routes and `wait`/`check` is always empty — `doctor` will say
+"Only one participant", and `join` will now refuse a reviewer that reuses the
+initiator's id. If you hit either, STOP and fix `COLLAB_AGENT` (distinct per tool) before
+continuing. This is the single most common setup failure; catch it early.
 
 ## Setup (do this first, once per request)
 
@@ -223,7 +234,8 @@ separate terminal so Codex/Copilot pick up review requests automatically:
 
 ```bash
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot -p
+# Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 ```
 
 See `references/watchers.md` for the details (timeouts, retries, the stdin payload).

@@ -48,9 +48,21 @@ CODEX_DEST="$HOME/.codex/skills/agent-collab"
 mkdir -p "$CODEX_DEST"
 cp -R "$PLUGIN/skills/agent-collab/." "$CODEX_DEST/"
 cp "$PLUGIN/AGENTS.md" "$CODEX_DEST/AGENTS.md"
-echo "synced Codex skill -> $CODEX_DEST"
+# The shared SKILL.md is identity-neutral, but make the Codex install unambiguous:
+# prepend a banner so a Codex session defaults to codex-1, never claude-1.
+if ! head -1 "$CODEX_DEST/SKILL.md" | grep -q "Codex install"; then
+  printf '%s\n\n%s\n' \
+    "> **Codex install:** your identity here is \`codex-1\` unless \$COLLAB_AGENT is set. Never act as \`claude-1\`." \
+    "$(cat "$CODEX_DEST/SKILL.md")" > "$CODEX_DEST/SKILL.md"
+fi
+echo "synced Codex skill -> $CODEX_DEST (defaults to codex-1)"
 python3 "$CODEX_DEST/bin/collab.py" --help >/dev/null && echo "Codex CLI OK (has: $(python3 "$CODEX_DEST/bin/collab.py" --help 2>&1 | grep -o 'doctor' | head -1 || echo 'no doctor?'))"
 
 echo
-echo "Done. In each tool set:  export COLLAB_AGENT=claude-1   (Claude)  /  codex-1  (Codex)"
-echo "and a shared local COLLAB_ROOT, e.g.  export COLLAB_ROOT=\$HOME/.collab"
+echo "=============================================================="
+echo " IMPORTANT — set a DISTINCT identity in EACH tool before use:"
+echo "   Claude session:  export COLLAB_AGENT=claude-1"
+echo "   Codex  session:  export COLLAB_AGENT=codex-1"
+echo " Both must share:   export COLLAB_ROOT=\$HOME/.collab"
+echo " Two tools sharing one id is the #1 failure — nothing routes."
+echo "=============================================================="

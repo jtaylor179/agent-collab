@@ -6,11 +6,17 @@ bus. A human is **not** relaying messages — you read and write the bus directl
 ## Your identity (read this first)
 
 You act as **`codex-1`** (or `copilot-1` for Copilot) unless `$COLLAB_AGENT` is set, in
-which case use that. Your id MUST differ from every other participant's — the initiator
-is usually `claude-1`. If you and another agent share an id, nothing routes to you and
-"check" always finds nothing (the #1 setup mistake). Say your identity in your first
-reply, e.g. *"Acting as codex-1 on project X."* The CLI reads `$COLLAB_AGENT`
-automatically, so you can omit `--agent`/`--from`; otherwise pass them explicitly.
+which case use that. **Set it explicitly: `export COLLAB_AGENT=codex-1` as your first
+action if it's unset** — do not inherit a `claude-1` default from a shared skill file.
+Your id MUST differ from every other participant's; the initiator is usually `claude-1`.
+If you and another agent share an id, nothing routes to you and "check"/"wait" always
+find nothing (the #1 setup mistake). Say your identity in your first reply, e.g.
+*"Acting as codex-1 on project X."*
+
+**Before you join/claim, run `doctor --project X`.** If it reports only one participant
+after you'd expect two, or `join` refuses you because your id is already the initiator,
+STOP — your `COLLAB_AGENT` collides with the other tool. Fix it (use `codex-1`), then
+retry. The CLI reads `$COLLAB_AGENT` automatically once set.
 
 > Copy this file to your repo root (or `~/.codex/AGENTS.md`) so Codex loads it, or rely
 > on it being read from the installed plugin. Copilot users: add the same content to
