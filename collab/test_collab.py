@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 
-from collab import Store, CollabError, watch
+from collab import Store, CollabError, watch, _bind_payload
 
 FAKE_AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 
@@ -580,22 +580,29 @@ class TestWatcherHardening(Base):
 
 
 class TestV02Usability(Base):
-    def test_join_does_not_demote_initiator(self):
-        """Codex P1.2: the initiator 'joining' as reviewer must NOT be demoted —
-        otherwise the same-identity collision hides from doctor."""
+    def test_join_as_initiator_id_is_refused(self):
+        """The identity-collision hard stop: a reviewer joining under the id that is
+        already the initiator (two tools sharing one id) must RAISE, not silently
+        register a self-collision. This is the bug that made wait/claim always empty."""
         s = self.s
-        s.start("A", "t", "g", "codex-1")            # codex-1 is initiator
-        res = s.join("A", "codex-1")                  # same id tries to join as reviewer
-        self.assertEqual(res["role"], "initiator")   # role preserved, not demoted
-        self.assertIn("warning", res)
+        s.start("A", "t", "g", "claude-1")           # claude-1 is initiator
+        with self.assertRaises(CollabError) as ctx:
+            s.join("A", "claude-1")                  # same id tries to join as reviewer
+        self.assertIn("INITIATOR", str(ctx.exception))
+        # the project is unchanged: still just the one initiator
         parts = {p["agent_id"]: p["role"] for p in s.participants("A")}
-        self.assertEqual(parts, {"codex-1": "initiator"})
+        self.assertEqual(parts, {"claude-1": "initiator"})
+
+    def test_distinct_reviewer_joins_fine(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        res = s.join("A", "codex-1")                 # distinct id -> OK
+        self.assertEqual(res["role"], "reviewer")
 
     def test_doctor_flags_single_participant_collision(self):
         s = self.s
         s.start("A", "t", "g", "codex-1")
-        s.join("A", "codex-1")          # the exact failure mode from the real run
-        d = s.doctor("A", "codex-1")
+        d = s.doctor("A", "codex-1")    # only the initiator present (the failure shape)
         self.assertTrue(any("Only one participant" in h for h in d["hints"]))
 
     def test_doctor_flags_no_review_request(self):
@@ -772,3 +779,108 @@ class TestVersionConsistency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPresenceAndInbox(Base):
+    """Phase-4 ergonomics: presence classification, directed-message footgun warnings,
+    the inbox view/drain, and log filters."""
+
+    @staticmethod
+    def _ago(**kw):
+        from datetime import datetime, timezone, timedelta
+        return (datetime.now(timezone.utc) - timedelta(**kw)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def test_presence_classification(self):
+        from collab import presence, now_iso
+        self.assertEqual(presence(None)[0], "unknown")
+        self.assertEqual(presence("not-a-timestamp")[0], "unknown")
+        self.assertEqual(presence(now_iso())[0], "online")
+        self.assertEqual(presence(self._ago(minutes=10))[0], "idle")
+        self.assertEqual(presence(self._ago(hours=2))[0], "offline")
+
+    def test_status_exposes_presence(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        parts = {p["agent"]: p for p in s.status("A")["participants"]}
+        self.assertEqual(parts["codex-1"]["presence"], "online")
+        self.assertIn("last_seen_age_s", parts["codex-1"])
+
+    def test_directed_status_warns_and_creates_no_inbox(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        rr = s.post("A", "claude-1", "codex-1", "status", "fyi")
+        self.assertIn("warning", rr)
+        self.assertIn("log-only", rr["warning"])
+        self.assertEqual(len(s.poll("A", "codex-1")), 0)  # no inbox row
+
+    def test_directed_actionable_to_offline_warns_but_queues(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        with s.write_tx():
+            s.conn.execute(
+                "UPDATE participants SET last_heartbeat=? WHERE project=? AND agent_id=?",
+                (self._ago(hours=2), "A", "codex-1"))
+        rr = s.post("A", "claude-1", "codex-1", "review_request", "rev")
+        self.assertIn("warning", rr)
+        self.assertEqual(rr.get("recipient_presence"), "offline")
+        self.assertEqual(len(s.poll("A", "codex-1")), 1)  # still queued durably
+
+    def test_online_directed_actionable_has_no_warning(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        rr = s.post("A", "claude-1", "codex-1", "review_request", "rev")
+        self.assertNotIn("warning", rr)
+
+    def test_inbox_view_and_drain(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "rev one")
+        s.post("A", "claude-1", "codex-1", "question", "q two")
+        view = s.inbox_view("A", "codex-1")
+        self.assertEqual(view["pending"], 2)
+        self.assertEqual(view["items"][0]["type"], "review_request")
+        self.assertEqual(view["items"][0]["from"], "claude-1")
+        drained = s.inbox_drain("A", "codex-1")
+        self.assertEqual(drained["drained"], 2)
+        self.assertEqual(s.inbox_view("A", "codex-1")["pending"], 0)
+        # drain is idempotent on an empty inbox
+        self.assertEqual(s.inbox_drain("A", "codex-1")["drained"], 0)
+
+    def test_log_filters(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "rev")
+        s.post("A", "claude-1", "codex-1", "status", "fyi")
+        self.assertEqual(len(s.log("A", actionable_only=True)), 1)
+        self.assertEqual(len(s.log("A", to_agent="codex-1")), 2)
+        self.assertEqual(len(s.log("A", from_agent="codex-1")), 0)
+
+
+class TestPayloadBinding(Base):
+    """The watcher feeds the agent on stdin by default, or as an argument when the
+    exec_argv contains the `{}` placeholder — so a prompt-as-arg CLI (GitHub Copilot's
+    `copilot -p <text>`) works without a wrapper, while `codex exec` (stdin) is
+    unchanged."""
+
+    def test_default_is_stdin(self):
+        argv, stdin_text = _bind_payload(["codex", "exec"], "REVIEW THIS")
+        self.assertEqual(argv, ["codex", "exec"])
+        self.assertEqual(stdin_text, "REVIEW THIS")
+
+    def test_placeholder_becomes_argument_and_no_stdin(self):
+        argv, stdin_text = _bind_payload(
+            ["copilot", "--allow-all-tools", "-p", "{}"], "REVIEW THIS")
+        self.assertEqual(argv, ["copilot", "--allow-all-tools", "-p", "REVIEW THIS"])
+        self.assertIsNone(stdin_text)  # prompt is an arg now; nothing on stdin
+
+    def test_placeholder_embedded_in_token(self):
+        argv, stdin_text = _bind_payload(["tool", "--prompt={}"], "HELLO")
+        self.assertEqual(argv, ["tool", "--prompt=HELLO"])
+        self.assertIsNone(stdin_text)

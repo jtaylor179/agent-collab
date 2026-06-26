@@ -15,13 +15,18 @@ export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 # Codex (reads instructions from stdin when no prompt arg is given):
 python3 "$BIN" watch --project X --agent codex-1 --exec codex exec
 
-# Copilot:
-python3 "$BIN" watch --project X --agent copilot-1 --exec copilot -p
+# Copilot (wants the prompt as the -p ARG, not stdin, and needs --allow-all-tools for
+# non-interactive mode): use the {} placeholder — the watcher substitutes the message
+# there and sends nothing on stdin. `--exec copilot -p` (no {}) fails with
+# "option '-p, --prompt <text>' argument missing".
+python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 ```
 
-Everything after `--exec` is the agent's command + args; the claimed message arrives
-on the agent's stdin as JSON (instructions + the message + the exact referenced
-artifact content). The agent writes ONLY its review to stdout.
+Everything after `--exec` is the agent's command + args. By default the claimed message
+arrives on the agent's stdin as JSON (instructions + the message + the exact referenced
+artifact content); if the exec argv contains `{}`, the message is substituted there as
+an argument instead (for CLIs like Copilot that take the prompt as a flag). The agent
+writes ONLY its review to stdout.
 
 ## Flags
 
