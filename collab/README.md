@@ -120,8 +120,9 @@ python3 collab.py watch --project A --agent codex-1 --exec codex exec
 # non-interactive mode. Use the {} placeholder (--model is optional):
 python3 collab.py watch --project A --agent copilot-1 \
   --exec copilot --allow-all-tools --model gpt-5.4 -p {}
-# (or the bundled adapter, which sets --allow-all-tools + --model gpt-5.4 [override
-#  with COPILOT_MODEL] and reads stdin:
+# (or the bundled adapter, which reads stdin, pins --model gpt-5.4 [override with
+#  COPILOT_MODEL], and is READ-ONLY by default — denies the edit/create/write tools so
+#  a review can't modify the repo [COPILOT_READONLY=0 to allow writes]:
 #  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo )
 
 # everything after --exec is the agent argv; --once / --max N / --idle-exit control

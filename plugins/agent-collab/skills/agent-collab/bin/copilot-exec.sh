@@ -19,5 +19,20 @@
 # (a later --model wins, so an explicit flag overrides this default).
 set -euo pipefail
 COPILOT_MODEL="${COPILOT_MODEL:-gpt-5.4}"
+
+# Read-only by default. A watcher review should read files and run git/build/tests but
+# never edit the repo, so we deny the file-mutation tools. Per GitHub Copilot's docs,
+# "denial rules always take precedence" — so these win even under --allow-all-tools.
+# NOTE: `bash` stays available (a reviewer needs `git diff` / build / tests), so a shell
+# command could still technically write. This blocks the agent's dedicated edit tools;
+# it is NOT a hermetic sandbox. For a hard guarantee, run against a read-only checkout.
+# Disable (full read/write) with COPILOT_READONLY=0.
+readonly_args=()
+if [ "${COPILOT_READONLY:-1}" != "0" ]; then
+  readonly_args=(--deny-tool write edit create apply_patch)
+fi
+
 prompt="$(cat)"
-exec copilot --allow-all-tools --model "$COPILOT_MODEL" "$@" -p "$prompt"
+# ${arr[@]+"${arr[@]}"} = bash-3.2-safe expansion of a possibly-empty array under set -u.
+exec copilot --allow-all-tools ${readonly_args[@]+"${readonly_args[@]}"} \
+  --model "$COPILOT_MODEL" "$@" -p "$prompt"
