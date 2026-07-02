@@ -81,7 +81,7 @@ the first idea if a better one exists.
 The human can instead run a watcher so you're invoked automatically:
 
 ```bash
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1 --exec codex exec
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1 --exec codex exec -c service_tier=fast
 ```
 
 In that mode the bus feeds you each claimed message (instructions + the message + the

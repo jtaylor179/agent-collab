@@ -73,7 +73,7 @@ the build sandbox.
 ```bash
 BIN="/absolute/path/to/plugins/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
-python3 "$BIN" watch --project A --agent codex-1 --exec codex exec
+python3 "$BIN" watch --project A --agent codex-1 --exec codex exec -c service_tier=fast
 ```
 
 ## Shared data

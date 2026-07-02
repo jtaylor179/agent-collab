@@ -114,7 +114,7 @@ payload is substituted there (and nothing is sent on stdin):
 
 ```bash
 # Codex — reads the prompt on stdin (default):
-python3 collab.py watch --project A --agent codex-1 --exec codex exec
+python3 collab.py watch --project A --agent codex-1 --exec codex exec -c service_tier=fast
 
 # GitHub Copilot — wants the prompt as the -p arg AND needs --allow-all-tools for
 # non-interactive mode. Use the {} placeholder (--model is optional):

@@ -80,7 +80,7 @@ decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent
             # binding; converges + clears this project's pending AND claimed inbox rows
 log      --project X [--since N] [--follow]
 delete   --project X --yes
-watch    --project X --exec codex exec                                 # hands-off reviewer loop
+watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
 ```
 
 Message `--type`: `review_request question response rebuttal proposal decision status heartbeat`
@@ -146,7 +146,7 @@ Once you have the work product:
 4. Then **tell the user, in words, exactly what to do next** — don't just print CLI
    commands. For example: *"Posted. Now bring in a reviewer: in your Codex session say
    'review collab project X', or run the watcher `… watch --project X --agent codex-1
-   --exec codex exec`."* Make sure the reviewer uses a different id (`codex-1`) and the
+   --exec codex exec -c service_tier=fast`."* Make sure the reviewer uses a different id (`codex-1`) and the
    same `COLLAB_ROOT` (`$COLLAB_ROOT`).
 5. **Then ask whether to wait for feedback now:** *"Want me to wait here for the
    reviewers' responses? I'll block up to ~10 min (this ties up the session), or you can
@@ -233,7 +233,7 @@ Other agents don't have to be babysat. Tell the user they can run a watcher in a
 separate terminal so Codex/Copilot pick up review requests automatically:
 
 ```bash
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 ```

@@ -35,4 +35,4 @@ fi
 prompt="$(cat)"
 # ${arr[@]+"${arr[@]}"} = bash-3.2-safe expansion of a possibly-empty array under set -u.
 exec copilot --allow-all-tools ${readonly_args[@]+"${readonly_args[@]}"} \
-  --model "$COPILOT_MODEL" "$@" -p "$prompt"
+  --model "$COPILOT_MODEL" --silent "$@" -p "$prompt"

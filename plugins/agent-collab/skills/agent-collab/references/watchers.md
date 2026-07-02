@@ -13,7 +13,7 @@ BIN="${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 
 # Codex (reads instructions from stdin when no prompt arg is given):
-python3 "$BIN" watch --project X --agent codex-1 --exec codex exec
+python3 "$BIN" watch --project X --agent codex-1 --exec codex exec -c service_tier=fast
 
 # Copilot (wants the prompt as the -p ARG, not stdin, and needs --allow-all-tools for
 # non-interactive mode): use the {} placeholder — the watcher substitutes the message
@@ -27,6 +27,17 @@ arrives on the agent's stdin as JSON (instructions + the message + the exact ref
 artifact content); if the exec argv contains `{}`, the message is substituted there as
 an argument instead (for CLIs like Copilot that take the prompt as a flag). The agent
 writes ONLY its review to stdout.
+
+The packaged launcher wraps these defaults:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" codex X /path/to/repo
+```
+
+For Codex, the launcher defaults `COLLAB_CODEX_EXEC_ARGS` to
+`-c service_tier=fast`, matching codex-cli 0.125 behavior. Override it per run, for
+example `COLLAB_CODEX_EXEC_ARGS="" ... collab-watch.sh codex X` for plain
+`codex exec`.
 
 ## Flags
 

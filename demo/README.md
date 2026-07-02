@@ -82,7 +82,7 @@ The repo ships an `AGENTS.md` here so Codex knows the protocol. Either:
 **Hands-off (recommended)** — one command; Codex auto-reviews whatever's pending:
 
 ```bash
-python3 "$BIN" --root "$COLLAB_ROOT" watch --project demo --agent codex-1 --exec codex exec
+python3 "$BIN" --root "$COLLAB_ROOT" watch --project demo --agent codex-1 --exec codex exec -c service_tier=fast
 ```
 
 **Or manual** — start `codex` in this folder and paste:

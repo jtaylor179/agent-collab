@@ -33,7 +33,7 @@ terminal, then:
 
 1. **Claude:** `/collab-review ./spec.md` — snapshots the file, broadcasts a review
    request, and offers to wait.
-2. **Codex:** say `review collab project <name>` (or run `watch … --exec codex exec`
+2. **Codex:** say `review collab project <name>` (or run `watch … --exec codex exec -c service_tier=fast`
    for hands-off).
 3. **Claude:** `/collab-wait` (or answer "yes, wait") — it pulls Codex's review,
    reconciles with an accept/reject ledger, and converges. Or `/collab-check` later.
@@ -81,6 +81,13 @@ agents are timed out and bounded, with stuck messages surfaced as `stalled`.
 ## Hands-off reviewers
 
 Run a watcher in a separate terminal so Codex/Copilot pick up requests automatically.
+The packaged launcher is the easiest path:
+
+```bash
+skills/agent-collab/bin/collab-watch.sh codex A /path/to/repo
+```
+
+Raw CLI equivalent:
 Point `BIN` at the bundled CLI using an explicit path — inside Claude it's
 `${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py`; from a checkout, use the
 absolute path to `skills/agent-collab/bin/collab.py`:
@@ -88,12 +95,12 @@ absolute path to `skills/agent-collab/bin/collab.py`:
 ```bash
 BIN="/absolute/path/to/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
-python3 "$BIN" watch --project A --agent codex-1   --exec codex exec
+python3 "$BIN" watch --project A --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot wants the prompt as an arg + non-interactive perms; {} = the message:
 python3 "$BIN" watch --project A --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 ```
 
-See `skills/agent-collab/references/watchers.md` for flags and failure handling.
+See `skills/agent-collab/references/watchers.md` for flags, overrides, and failure handling.
 
 ## Data location
 

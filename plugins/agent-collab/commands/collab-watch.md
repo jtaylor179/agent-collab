@@ -19,7 +19,9 @@ Steps:
    (defaults: `COLLAB_ROOT=$HOME/.collab`, repo-dir = current dir, Copilot model
    `gpt-5.4`). For Copilot it uses the `copilot-exec.sh` adapter (model `gpt-5.4`, prompt
    as `-p`, and READ-ONLY by default — denies the edit/create/write tools so a review
-   can't modify the repo); for Codex, `codex exec` (stdin).
+   can't modify the repo); for Codex, `codex exec -c service_tier=fast` (stdin). Override
+   Codex exec flags with `COLLAB_CODEX_EXEC_ARGS`, or set it to an empty string to use
+   plain `codex exec`.
 2. **Run it in the background** (this is a long-running daemon — it must not block the
    session). Report that the watcher is running, which agent/project/root it's serving,
    and how to stop it (kill the background task). Tell the user the watcher keeps

@@ -38,7 +38,7 @@ review collab project <name>
 …or run the hands-off watcher in a terminal so Codex auto-reviews:
 
 ```bash
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project <name> --agent codex-1 --exec codex exec
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project <name> --agent codex-1 --exec codex exec -c service_tier=fast
 ```
 
 **3. Back in Claude — get the feedback.** Either answer "yes, wait" to the offer from
@@ -102,7 +102,7 @@ After Codex has reviewed, paste:
 **Hands-off (recommended)** — one command; auto-reviews whatever's pending:
 
 ```bash
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project myproject --agent codex-1 --exec codex exec
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project myproject --agent codex-1 --exec codex exec -c service_tier=fast
 ```
 
 **Or interactively** — start `codex` and paste:

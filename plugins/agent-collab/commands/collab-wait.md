@@ -21,7 +21,8 @@ Steps:
    - If it returns `{"claimed": null}` (timed out): report that nothing arrived and ask
      whether to keep waiting.
 4. Remind the user that for true walk-away operation, the external watcher
-   (`watch --exec codex exec`, see `references/watchers.md`) is better — `--wait` keeps
+   (`collab-watch.sh codex <project>` or `watch --exec codex exec -c service_tier=fast`,
+   see `references/watchers.md`) is better — `--wait` keeps
    this one session busy and consumes tokens while idle.
 
 Arguments (optional): $ARGUMENTS may contain the project name and/or a wait duration.
