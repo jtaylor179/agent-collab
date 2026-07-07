@@ -1,12 +1,13 @@
 ---
 name: agent-collab
 description: >-
-  Collaborate with other AI agents (Codex, Copilot) on a shared spec or codebase
-  through a durable message bus, instead of the human copy/pasting between tools.
-  Use when the user says "start collab project <X>", "join collab project <X>",
-  "check collab project <X>", asks to get another agent's review through the bus,
-  to send feedback/a rebuttal to another agent, or to run a multi-agent
-  convergence loop toward a shared design. The bus is the bundled `collab` CLI.
+  Collaborate with other AI agents (Codex, Copilot, Cursor) on a shared spec or
+  codebase through a durable message bus, instead of the human copy/pasting between
+  tools. Use when the user says "start collab project <X>", "start agent-collab with
+  cursor", "join collab project <X>", "check collab project <X>", asks to get another
+  agent's review through the bus, to send feedback/a rebuttal to another agent, or to
+  run a multi-agent convergence loop toward a shared design. The bus is the bundled
+  `collab` CLI.
 ---
 
 # agent-collab
@@ -21,9 +22,9 @@ tool you are*:
 
 - If `$COLLAB_AGENT` is set, use it verbatim.
 - If it is NOT set, choose by your tool — **`claude-1` if you are Claude, `codex-1` if
-  you are Codex, `copilot-1` if you are Copilot** — and tell the user which you chose.
-  Do **not** blindly default to `claude-1` if you are not Claude; that's how two tools
-  collide on one id.
+  you are Codex, `copilot-1` if you are Copilot, `cursor-1` if you are Cursor** — and
+  tell the user which you chose.  Do **not** blindly default to `claude-1` if you are
+  not Claude; that's how two tools collide on one id.
 
 State your identity in your first reply, e.g. *"Acting as codex-1 on project X."* The
 CLI reads `$COLLAB_AGENT` automatically, so you can omit `--agent`/`--from` when it's
@@ -40,12 +41,18 @@ continuing. This is the single most common setup failure; catch it early.
 The bus is a single-file CLI bundled with this plugin. Define these and use them in
 every call:
 
-- `COLLAB_BIN` = `${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py`
+- `COLLAB_BIN` = path to `collab.py`. Resolve in order (first file that exists):
+  1. `${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` (Claude plugin)
+  2. `$HOME/.codex/skills/agent-collab/bin/collab.py` (Codex skill copy)
+  3. `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/0.3.2/skills/agent-collab/bin/collab.py`
+  4. `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/0.3.2/skills/agent-collab/bin/collab.py`
 - `COLLAB_ROOT` = the data dir for the bus. **Use a local-disk path** that every
   participating agent shares; default to `$HOME/.collab` so both sides
   deterministically land on the same bus. Pass it as `--root "$COLLAB_ROOT"` on every
   command, or export it once. Avoid a mounted/synced/network folder: SQLite needs file
   locking, and the CLI will say so clearly if the path can't support it.
+- Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires `pip install
+  cursor-sdk` and `CURSOR_API_KEY`). See `references/cursor-start.md`.
 
 Every command is `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" <verb> ...`. Output is
 JSON on stdout; parse it. Errors go to stderr with a non-zero exit code — read them,
@@ -117,6 +124,7 @@ so and offer to start a new project (which needs a work product).
 | "list / what are my collab projects" | Run `projects` and present the list (name, state, participants, last updated). |
 | "join collab project" / "check collab" (no name) | Run `projects`, present the list, and ask which one before doing anything. |
 | "start collab project X" / "collab on X" | Orient with `doctor`; if new, get a work product then start + broadcast; if it exists, join/continue. |
+| "start agent-collab with cursor …" / "collab on X with cursor" | Initiator flow (you = `claude-1` or `codex-1`); after broadcast, onboard **cursor-1** via watcher or interactive Cursor session — follow `references/cursor-start.md` verbatim. |
 | "check collab project X" / "any feedback?" | Drain your inbox (claim → act → complete), summarize from the `log`; if nothing's pending, OFFER to wait. |
 | "wait for the review / wait for replies" | Confirm, then block with `claim --project X --wait <sec>` and handle what arrives; loop if they want. Note it ties up the session (watcher is better for walk-away). |
 | "send my feedback / rebuttal to <agent>" | `post` a `rebuttal`/`response` in the existing thread. |
@@ -144,10 +152,15 @@ Once you have the work product:
        --to broadcast --type review_request --round 1 --artifact spec.md@v1 --body-file -
    ```
 4. Then **tell the user, in words, exactly what to do next** — don't just print CLI
-   commands. For example: *"Posted. Now bring in a reviewer: in your Codex session say
-   'review collab project X', or run the watcher `… watch --project X --agent codex-1
-   --exec codex exec -c service_tier=fast`."* Make sure the reviewer uses a different id (`codex-1`) and the
-   same `COLLAB_ROOT` (`$COLLAB_ROOT`).
+   commands. Pick the reviewer they asked for:
+   - **Codex:** *"In your Codex session say 'review collab project X', or run
+     `collab-watch.sh codex X /path/to/repo`."*
+   - **Copilot:** *"Run `collab-watch.sh copilot X /path/to/repo`."*
+   - **Cursor:** *"Run `collab-watch.sh cursor X /path/to/repo` (needs
+     `pip install cursor-sdk` + `CURSOR_API_KEY`), or in Cursor say 'review collab
+     project X' as cursor-1."* — full recipe in `references/cursor-start.md`.
+   Make sure the reviewer uses a different id (`codex-1`, `copilot-1`, or
+   `cursor-1`) and the same `COLLAB_ROOT` (`$COLLAB_ROOT`).
 5. **Then ask whether to wait for feedback now:** *"Want me to wait here for the
    reviewers' responses? I'll block up to ~10 min (this ties up the session), or you can
    come back later and say 'check collab project X'."* Only wait on a yes — then
@@ -227,18 +240,25 @@ agreement theater. Hold yourself and the loop to this:
 - Reference artifacts as `name@version`, never "the latest" — versions are immutable.
 - Keep replies in their thread so the convergence history stays coherent.
 
-## Bringing in Codex / Copilot as hands-off reviewers
+## Bringing in Codex / Copilot / Cursor as hands-off reviewers
 
 Other agents don't have to be babysat. Tell the user they can run a watcher in a
-separate terminal so Codex/Copilot pick up review requests automatically:
+separate terminal so Codex/Copilot/Cursor pick up review requests automatically:
 
 ```bash
+# Launcher (resolves collab.py + adapter paths):
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" codex   X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" copilot X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" cursor  X /path/to/repo
+
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
+# Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 --exec "${COLLAB_BIN%/collab.py}/cursor-exec.sh"
 ```
 
-See `references/watchers.md` for the details (timeouts, retries, the stdin payload).
+See `references/watchers.md` and `references/cursor-start.md` for details.
 
 ## Watching and reporting
 

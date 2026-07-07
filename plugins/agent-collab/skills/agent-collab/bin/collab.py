@@ -230,7 +230,7 @@ class Store:
                 "join as a reviewer. This almost always means two tools are using the "
                 f"SAME agent id ('{agent}'). Give the reviewer a DISTINCT id: set "
                 "COLLAB_AGENT (claude-1 for Claude, codex-1 for Codex, copilot-1 for "
-                "Copilot) in the reviewer's environment, then join again. If you ARE the "
+                "Copilot, cursor-1 for Cursor) in the reviewer's environment, then join again. If you ARE the "
                 "initiator, you don't need to join — just check the project.")
         effective_role = existing["role"] if existing else role
         with self.write_tx():
@@ -838,7 +838,7 @@ class Store:
                  "(a local-disk path) and each a DISTINCT agent id.")
         if not agent:
             h.append("No agent identity resolved. Set COLLAB_AGENT (e.g. claude-1 for "
-                     "Claude, codex-1 for Codex) or pass --agent.")
+                     "Claude, codex-1 for Codex, copilot-1 for Copilot, cursor-1 for Cursor) or pass --agent.")
         if not exists:
             h.append(f"Project '{project}' does not exist yet. To start it you must "
                      "provide a work product to review (a file). Starting from just a "
@@ -1301,7 +1301,7 @@ def main(argv=None):
     NEED_FROM = {"post", "complete", "decide"}
     if args.cmd in NEED_AGENT and not getattr(args, "agent", None):
         print(json.dumps({"error": "no agent identity: pass --agent or set "
-                          "COLLAB_AGENT (e.g. claude-1 for Claude, codex-1 for Codex)"}),
+                          "COLLAB_AGENT (e.g. claude-1 for Claude, codex-1 for Codex, cursor-1 for Cursor)"}),
               file=sys.stderr)
         return 1
     if args.cmd in NEED_FROM and not getattr(args, "from_agent", None):

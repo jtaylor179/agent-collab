@@ -20,6 +20,9 @@ python3 "$BIN" watch --project X --agent codex-1 --exec codex exec -c service_ti
 # there and sends nothing on stdin. `--exec copilot -p` (no {}) fails with
 # "option '-p, --prompt <text>' argument missing".
 python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
+
+# Cursor (Cursor Agent SDK via cursor-exec.sh; reads stdin JSON like Codex):
+python3 "$BIN" watch --project X --agent cursor-1 --exec /path/to/cursor-exec.sh
 ```
 
 Everything after `--exec` is the agent's command + args. By default the claimed message
@@ -32,12 +35,17 @@ The packaged launcher wraps these defaults:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" codex X /path/to/repo
+"${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" cursor X /path/to/repo
 ```
 
 For Codex, the launcher defaults `COLLAB_CODEX_EXEC_ARGS` to
 `-c service_tier=fast`, matching codex-cli 0.125 behavior. Override it per run, for
 example `COLLAB_CODEX_EXEC_ARGS="" ... collab-watch.sh codex X` for plain
 `codex exec`.
+
+For Cursor, install `cursor-sdk` (`pip install cursor-sdk`) and set `CURSOR_API_KEY`.
+Read-only by default (`CURSOR_READONLY=1` → `plan` mode). Override model with
+`CURSOR_MODEL` (default `composer-2.5`).
 
 ## Flags
 

@@ -6,11 +6,12 @@ want to use it with.
 
 > **Upgrading? Installs do not auto-update.** If you installed an earlier version, the
 > running Claude/Codex keep using the old copy until you re-sync. The fastest way is to
-> run **`./sync.sh`** from this directory — it refreshes the Claude marketplace +
-> reinstalls, and copies the current skill/CLI into `~/.codex/skills/agent-collab`. Then
-> restart Claude Code / Codex. Verify with `claude plugin list` (version) and
-> `python3 ~/.codex/skills/agent-collab/bin/collab.py doctor --project x` (should know
-> the `doctor` command).
+> run **`./sync.sh`** from this directory — it refreshes the Claude marketplace,
+> installs `agent-collab@agent-collab-marketplace` as a native global Codex plugin,
+> and refreshes the legacy `~/.codex/skills/agent-collab` fallback for older Codex
+> builds. Then restart Claude Code / Codex. Verify with `claude plugin list`,
+> `codex plugin list`, and `python3 ~/.codex/skills/agent-collab/bin/collab.py doctor
+> --project x` (should know the `doctor` command).
 
 ## 1. Claude Cowork (desktop app)
 
@@ -46,27 +47,24 @@ claude plugin validate --strict /absolute/path/to/Collaborate/plugins/agent-coll
 
 Three ways, not mutually exclusive:
 
-**a) AGENTS.md (simplest, no install).** Copy `plugins/agent-collab/AGENTS.md` to the
+**a) Native Codex plugin (preferred).** The `plugins/agent-collab/` directory carries a
+`.codex-plugin/plugin.json` (with `skills` + `interface`), and the repo root holds a
+Codex marketplace at `.agents/plugins/marketplace.json` pointing at it. To install
+globally:
+
+```bash
+codex plugin marketplace add /absolute/path/to/Collaborate
+codex plugin add agent-collab@agent-collab-marketplace
+codex plugin list      # should show agent-collab as enabled
+```
+
+`./sync.sh` runs those commands for the local checkout and should be the normal upgrade
+path. Restart Codex after installing so the plugin-provided skill is loaded.
+
+**b) AGENTS.md (simplest, no install).** Copy `plugins/agent-collab/AGENTS.md` to the
 root of the repo you're reviewing (or to `~/.codex/AGENTS.md`). Codex reads it
 automatically and will understand "join collab project X". Copilot users: paste the
 same content into custom instructions.
-
-**b) Codex plugin (proper install).** The `plugins/agent-collab/` directory carries a
-`.codex-plugin/plugin.json` (with `skills` + `interface`), and the repo root holds a
-Codex marketplace at `.agents/plugins/marketplace.json` pointing at it. To install:
-
-```bash
-# from your repo (Codex resolves source.path relative to the marketplace root):
-#   .agents/plugins/marketplace.json  ->  ./plugins/agent-collab
-codex
-/plugins                 # open the plugin directory, pick the "Agent Collab (local)"
-                         # marketplace, and Install; then restart Codex
-```
-
-The manifest and marketplace are authored to the current Codex docs
-(developers.openai.com/codex/plugins/build). Validate with `$plugin-creator` in your
-Codex environment before relying on it — it was not run through the Codex validator in
-the build sandbox.
 
 **c) Hands-off watcher (no install at all).** From any checkout:
 

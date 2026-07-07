@@ -62,8 +62,9 @@ Each agent needs a **distinct** id and they must share **one local-disk** bus:
 ## Upgrading
 
 Installs do not auto-update. After pulling a new version, run **`./sync.sh`** from the
-repo (it updates the Claude plugin and the Codex skill copy), then **restart** Claude
-Code / Codex. Verify with `claude plugin list` and `… doctor`.
+repo (it updates the Claude plugin, installs the native global Codex plugin, and
+refreshes the legacy Codex skill fallback), then **restart** Claude Code / Codex.
+Verify with `claude plugin list`, `codex plugin list`, and `… doctor`.
 
 ## How it works
 

@@ -4,6 +4,7 @@
 #
 #   collab-watch.sh copilot <project> [repo-dir]
 #   collab-watch.sh codex   <project> [repo-dir]
+#   collab-watch.sh cursor  <project> [repo-dir]
 #
 # It resolves collab.py + the copilot adapter next to itself, defaults COLLAB_ROOT to
 # $HOME/.collab (the shared bus root), runs in [repo-dir] (default: current dir), and
@@ -19,7 +20,7 @@ WRAP="$HERE/copilot-exec.sh"
 
 agent_arg="${1:-}"; project="${2:-}"; repo="${3:-$PWD}"
 if [ -z "$agent_arg" ] || [ -z "$project" ]; then
-  echo "usage: collab-watch.sh <copilot|codex> <project> [repo-dir]" >&2
+  echo "usage: collab-watch.sh <copilot|codex|cursor> <project> [repo-dir]" >&2
   exit 2
 fi
 
@@ -28,6 +29,7 @@ cd "$repo"
 
 case "$agent_arg" in
   copilot|copilot-1) agent="copilot-1"; exec_argv=("$WRAP");;
+  cursor|cursor-1) agent="cursor-1"; exec_argv=("$HERE/cursor-exec.sh");;
   codex|codex-1)
     agent="codex-1"
     codex_args="${COLLAB_CODEX_EXEC_ARGS--c service_tier=fast}"
@@ -38,7 +40,7 @@ case "$agent_arg" in
     fi
     exec_argv=(codex exec ${codex_exec_args[@]+"${codex_exec_args[@]}"})
     ;;
-  *) echo "unknown agent '$agent_arg' (use 'copilot' or 'codex')" >&2; exit 2;;
+  *) echo "unknown agent '$agent_arg' (use 'copilot', 'codex', or 'cursor')" >&2; exit 2;;
 esac
 
 echo "collab-watch: agent=$agent project=$project root=$COLLAB_ROOT repo=$PWD exec=${exec_argv[*]}" >&2

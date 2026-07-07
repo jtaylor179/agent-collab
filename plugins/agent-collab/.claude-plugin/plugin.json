@@ -1,7 +1,7 @@
 {
   "name": "agent-collab",
-  "version": "0.3.2",
-  "description": "Collaborate with other AI agents (Codex, Copilot) on a shared spec or codebase through a durable message bus, instead of copy/pasting between tools. Start a collab project, have other agents join and review, and converge on a shared design.",
+  "version": "0.3.3",
+  "description": "Collaborate with other AI agents (Codex, Copilot, Cursor) on a shared spec or codebase through a durable message bus, instead of copy/pasting between tools. Start a collab project, have other agents join and review, and converge on a shared design.",
   "author": {
     "name": "Jeff Taylor"
   },
@@ -11,7 +11,8 @@
     "code-review",
     "spec-review",
     "codex",
-    "copilot"
+    "copilot",
+    "cursor"
   ],
   "license": "MIT"
 }

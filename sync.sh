@@ -42,21 +42,32 @@ else
   echo "(claude CLI not found; skipping Claude install)"
 fi
 
-# --- Codex: sync the global skill copy (SKILL.md, bin/, references/) + AGENTS.md ---
+# --- Codex: register the local marketplace and install the native Codex plugin ---
 echo "== Codex =="
+if command -v codex >/dev/null 2>&1; then
+  codex plugin marketplace add "$REPO" >/dev/null 2>&1 || true
+  if codex plugin list --available --json 2>/dev/null | grep -q '"agent-collab"'; then
+    codex plugin add agent-collab@agent-collab-marketplace >/dev/null 2>&1 || true
+  fi
+  if codex plugin list --json 2>/dev/null | grep -q '"agent-collab"'; then
+    echo "installed Codex plugin -> agent-collab@agent-collab-marketplace"
+  else
+    echo "WARNING: Codex plugin install did not appear in 'codex plugin list --json'." >&2
+    echo "         Check: codex plugin marketplace list && codex plugin list --available" >&2
+  fi
+  echo "  >>> Restart Codex to load the native plugin."
+else
+  echo "(codex CLI not found; skipping Codex native plugin install)"
+fi
+
+# Compatibility for older Codex builds that only loaded ~/.codex/skills directly.
+# Keep this copy valid YAML-frontmatter-first; do not prepend identity banners.
 CODEX_DEST="$HOME/.codex/skills/agent-collab"
 mkdir -p "$CODEX_DEST"
 cp -R "$PLUGIN/skills/agent-collab/." "$CODEX_DEST/"
 cp "$PLUGIN/AGENTS.md" "$CODEX_DEST/AGENTS.md"
-# The shared SKILL.md is identity-neutral, but make the Codex install unambiguous:
-# prepend a banner so a Codex session defaults to codex-1, never claude-1.
-if ! head -1 "$CODEX_DEST/SKILL.md" | grep -q "Codex install"; then
-  printf '%s\n\n%s\n' \
-    "> **Codex install:** your identity here is \`codex-1\` unless \$COLLAB_AGENT is set. Never act as \`claude-1\`." \
-    "$(cat "$CODEX_DEST/SKILL.md")" > "$CODEX_DEST/SKILL.md"
-fi
-echo "synced Codex skill -> $CODEX_DEST (defaults to codex-1)"
-python3 "$CODEX_DEST/bin/collab.py" --help >/dev/null && echo "Codex CLI OK (has: $(python3 "$CODEX_DEST/bin/collab.py" --help 2>&1 | grep -o 'doctor' | head -1 || echo 'no doctor?'))"
+cp "$PLUGIN/CURSOR.md" "$CODEX_DEST/CURSOR.md" 2>/dev/null || true
+python3 "$CODEX_DEST/bin/collab.py" --help >/dev/null && echo "synced legacy Codex skill fallback -> $CODEX_DEST"
 
 # --- Copilot: sync the global skill copy used by GitHub Copilot-style agents ---
 echo "== Copilot =="
@@ -64,6 +75,7 @@ COPILOT_DEST="$HOME/.agents/skills/agent-collab"
 mkdir -p "$COPILOT_DEST"
 cp -R "$PLUGIN/skills/agent-collab/." "$COPILOT_DEST/"
 cp "$PLUGIN/AGENTS.md" "$COPILOT_DEST/AGENTS.md"
+cp "$PLUGIN/CURSOR.md" "$COPILOT_DEST/CURSOR.md" 2>/dev/null || true
 if ! head -1 "$COPILOT_DEST/SKILL.md" | grep -q "Copilot install"; then
   printf '%s\n\n%s\n' \
     "> **Copilot install:** your identity here is \`copilot-1\` unless \$COLLAB_AGENT is set. Never act as \`claude-1\`." \
@@ -77,6 +89,7 @@ echo " IMPORTANT — set a DISTINCT identity in EACH tool before use:"
 echo "   Claude session:  export COLLAB_AGENT=claude-1"
 echo "   Codex  session:  export COLLAB_AGENT=codex-1"
 echo "   Copilot session: export COLLAB_AGENT=copilot-1"
+echo "   Cursor session:  export COLLAB_AGENT=cursor-1"
 echo " Both must share:   export COLLAB_ROOT=\$HOME/.collab"
 echo " Two tools sharing one id is the #1 failure — nothing routes."
 echo "=============================================================="
