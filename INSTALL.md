@@ -25,10 +25,14 @@ The repo root holds a Claude marketplace at `.claude-plugin/marketplace.json`. A
 in **your own** environment, then install:
 
 ```bash
-# point at this repo's Collaborate/ directory:
-claude plugin marketplace add /absolute/path/to/Collaborate
+# from the public GitHub marketplace (no checkout needed):
+claude plugin marketplace add jtaylor179/agent-collab
 claude plugin install agent-collab@agent-collab-marketplace
 claude plugin list      # should show agent-collab as enabled
+
+# or point at a local checkout's Collaborate/ directory:
+claude plugin marketplace add /absolute/path/to/Collaborate
+claude plugin install agent-collab@agent-collab-marketplace
 ```
 
 To validate the source before installing:

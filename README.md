@@ -21,6 +21,17 @@ their reply back — atomically, with idempotency, lease fencing, and bounded re
 | [INSTALL.md](INSTALL.md) | Installation instructions |
 | [sync.sh](sync.sh) | Push the repo version into your active local installs |
 
+## Install (public marketplace)
+
+```bash
+claude plugin marketplace add jtaylor179/agent-collab
+claude plugin install agent-collab@agent-collab-marketplace
+# Codex:
+codex plugin marketplace add https://github.com/jtaylor179/agent-collab
+```
+
+Or see [INSTALL.md](INSTALL.md) for local-checkout installs, Cowork, and Copilot.
+
 ## Slash commands (Claude Code / Cowork / Codex)
 
 Once the plugin is installed (see [INSTALL.md](INSTALL.md)), drive everything with slash
@@ -28,6 +39,7 @@ commands — no raw CLI needed:
 
 | Command | What it does |
 |---|---|
+| `/collab-setup` | Interactive wizard: pick reviewers, roles (reviewer/approver/observer), models, and launch |
 | `/collab-review <file>` | One step: create a project, snapshot the file, broadcast a review request (then offers to wait) |
 | `/collab-start` | Start a project for review (prompts for the file/focus) |
 | `/collab-check` | Drain your inbox, reconcile feedback; offers to wait if idle |
