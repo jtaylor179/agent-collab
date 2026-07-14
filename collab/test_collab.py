@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 
-from collab import Store, CollabError, watch, _bind_payload
+from collab import Store, CollabError, watch, _bind_payload, _agent_payload
 
 FAKE_AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 
@@ -861,6 +861,160 @@ class TestPresenceAndInbox(Base):
         self.assertEqual(len(s.log("A", actionable_only=True)), 1)
         self.assertEqual(len(s.log("A", to_agent="codex-1")), 2)
         self.assertEqual(len(s.log("A", from_agent="codex-1")), 0)
+
+
+class TestApproverRole(Base):
+    """v0.3.5: an approver reviews like a reviewer, and decide() is gated on every
+    approver having posted an `approval` message (unless force=True)."""
+
+    def _project_with_approver(self):
+        s = self.s
+        s.start("A", "spec", "converge", "claude-1")
+        s.join("A", "codex-1")                     # plain reviewer
+        s.join("A", "copilot-1", role="approver")  # secondary approver
+        s.put_artifact("A", "spec.md", b"# v1\n", "claude-1")
+        s.post("A", "claude-1", "broadcast", "review_request", "review spec.md@v1",
+               round_=1, refs={"artifact": "spec.md@v1"})
+        return s
+
+    def test_approver_gets_broadcast_fanout(self):
+        s = self._project_with_approver()
+        claimed = s.claim("A", "copilot-1")
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["type"], "review_request")
+
+    def test_late_joining_approver_is_backfilled(self):
+        s = self.s
+        s.start("A", "spec", "converge", "claude-1")
+        s.post("A", "claude-1", "broadcast", "review_request", "review this", round_=1)
+        out = s.join("A", "copilot-1", role="approver")
+        self.assertEqual(out["role"], "approver")
+        self.assertEqual(out["backfilled"], 1)
+
+    def test_decide_blocked_until_approver_signs_off(self):
+        s = self._project_with_approver()
+        # A regular response from the approver is NOT a sign-off.
+        claimed = s.claim("A", "copilot-1")
+        s.complete("A", "copilot-1", claimed["claim_message_id"],
+                   claimed["claim_token"], "response", "one objection", round_=1)
+        with self.assertRaises(CollabError) as cm:
+            s.decide("A", "claude-1", "converging")
+        self.assertIn("copilot-1", str(cm.exception))
+        # An explicit approval unblocks decide.
+        s.post("A", "copilot-1", "claude-1", "approval", "objection resolved; approving")
+        out = s.decide("A", "claude-1", "converging")
+        self.assertEqual(out["state"], "converged")
+        self.assertEqual(out["approvals"], {"copilot-1": True})
+
+    def test_complete_with_type_approval_counts_as_sign_off(self):
+        s = self._project_with_approver()
+        claimed = s.claim("A", "copilot-1")
+        s.complete("A", "copilot-1", claimed["claim_message_id"],
+                   claimed["claim_token"], "approval", "reviewed and approved", round_=1)
+        out = s.decide("A", "claude-1", "done")
+        self.assertEqual(out["state"], "converged")
+
+    def test_force_overrides_missing_approvals(self):
+        s = self._project_with_approver()
+        out = s.decide("A", "claude-1", "shipping anyway", force=True)
+        self.assertEqual(out["state"], "converged")
+        self.assertEqual(out["forced_over_missing_approvals"], ["copilot-1"])
+
+    def test_status_and_doctor_surface_approval_gate(self):
+        s = self._project_with_approver()
+        self.assertEqual(s.status("A")["approvals"], {"copilot-1": False})
+        doc = s.doctor("A", "claude-1")
+        self.assertTrue(any("gated" in h for h in doc["hints"]))
+        # the missing approver is told directly
+        doc2 = s.doctor("A", "copilot-1")
+        self.assertTrue(any("You are one of the missing approvers" in h
+                            for h in doc2["hints"]))
+
+    def test_no_approvers_decide_unaffected(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        out = s.decide("A", "claude-1", "done")
+        self.assertEqual(out["state"], "converged")
+        self.assertNotIn("approvals", out)
+
+    def test_observer_gets_no_fanout(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1", role="observer")
+        s.post("A", "claude-1", "broadcast", "review_request", "r", round_=1)
+        self.assertIsNone(s.claim("A", "codex-1"))
+
+    def test_initiator_id_cannot_join_as_approver(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        with self.assertRaises(CollabError):
+            s.join("A", "claude-1", role="approver")
+
+
+class TestWatcherApprover(Base):
+    """v0.3.6: a hands-off approver (watcher-driven copilot/agy/codex) signs off by
+    leading its output with the APPROVED marker; the watcher then posts an
+    `approval` instead of a response, which is what unblocks decide()."""
+
+    def _fake_mode(self, mode):
+        env_was = os.environ.get("FAKE_AGENT_MODE")
+        os.environ["FAKE_AGENT_MODE"] = mode
+        def restore():
+            if env_was is None:
+                os.environ.pop("FAKE_AGENT_MODE", None)
+            else:
+                os.environ["FAKE_AGENT_MODE"] = env_was
+        self.addCleanup(restore)
+
+    def _project(self, approver_role):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "copilot-1", role=approver_role)
+        s.put_artifact("A", "spec.md", b"# v1\n", "claude-1")
+        s.post("A", "claude-1", "broadcast", "review_request", "review spec.md@v1",
+               round_=1, refs={"artifact": "spec.md@v1"})
+        return s
+
+    def test_approved_marker_posts_approval_and_unblocks_decide(self):
+        s = self._project("approver")
+        self._fake_mode("approve")
+        n = watch(s, "A", "copilot-1", [sys.executable, FAKE_AGENT],
+                  once=True, lease_min=10, log_fh=io.StringIO())
+        self.assertEqual(n, 1)
+        approvals = [m for m in s.log("A") if m["type"] == "approval"]
+        self.assertEqual(len(approvals), 1)
+        self.assertTrue(approvals[0]["body"].startswith("APPROVED"))
+        out = s.decide("A", "claude-1", "done")
+        self.assertEqual(out["state"], "converged")
+        self.assertEqual(out["approvals"], {"copilot-1": True})
+
+    def test_approver_objection_stays_response_and_gate_holds(self):
+        s = self._project("approver")
+        # default fake mode writes an objection (no APPROVED marker)
+        n = watch(s, "A", "copilot-1", [sys.executable, FAKE_AGENT],
+                  once=True, lease_min=10, log_fh=io.StringIO())
+        self.assertEqual(n, 1)
+        self.assertEqual([m["type"] for m in s.log("A") if m["from_agent"] == "copilot-1"],
+                         ["response"])
+        with self.assertRaises(CollabError):
+            s.decide("A", "claude-1", "done")
+
+    def test_reviewer_approved_output_is_not_promoted(self):
+        # the marker only means something from an approver
+        s = self._project("reviewer")
+        self._fake_mode("approve")
+        watch(s, "A", "copilot-1", [sys.executable, FAKE_AGENT],
+              once=True, lease_min=10, log_fh=io.StringIO())
+        types = [m["type"] for m in s.log("A") if m["from_agent"] == "copilot-1"]
+        self.assertEqual(types, ["response"])
+
+    def test_approver_payload_carries_approver_instructions(self):
+        s = self._project("approver")
+        claimed = s.claim("A", "copilot-1")
+        payload = json.loads(_agent_payload(s, "A", "copilot-1", claimed))
+        self.assertIn("APPROVER", payload["instructions"])
+        self.assertIn("APPROVED", payload["instructions"])
 
 
 class TestPayloadBinding(Base):

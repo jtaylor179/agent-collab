@@ -1,13 +1,15 @@
 ---
 name: agent-collab
 description: >-
-  Collaborate with other AI agents (Codex, Copilot, Cursor) on a shared spec or
+  Collaborate with other AI agents (Codex, Copilot, Cursor, Antigravity) on a shared spec or
   codebase through a durable message bus, instead of the human copy/pasting between
   tools. Use when the user says "start collab project <X>", "start agent-collab with
-  cursor", "join collab project <X>", "check collab project <X>", asks to get another
+  cursor", "start collab session with antigravity", "start collab session with agy",
+  "join collab project <X>", "check collab project <X>", asks to get another
   agent's review through the bus, to send feedback/a rebuttal to another agent, or to
-  run a multi-agent convergence loop toward a shared design. The bus is the bundled
-  `collab` CLI.
+  run a multi-agent convergence loop toward a shared design. A bare invocation with no
+  project, file, or reviewers named (e.g. just "agent-collab" or "set up a collab")
+  runs the interactive setup wizard. The bus is the bundled `collab` CLI.
 ---
 
 # agent-collab
@@ -22,7 +24,8 @@ tool you are*:
 
 - If `$COLLAB_AGENT` is set, use it verbatim.
 - If it is NOT set, choose by your tool — **`claude-1` if you are Claude, `codex-1` if
-  you are Codex, `copilot-1` if you are Copilot, `cursor-1` if you are Cursor** — and
+  you are Codex, `copilot-1` if you are Copilot, `cursor-1` if you are Cursor,
+  `antigravity-1` if you are Antigravity (agy)** — and
   tell the user which you chose.  Do **not** blindly default to `claude-1` if you are
   not Claude; that's how two tools collide on one id.
 
@@ -44,8 +47,8 @@ every call:
 - `COLLAB_BIN` = path to `collab.py`. Resolve in order (first file that exists):
   1. `${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` (Claude plugin)
   2. `$HOME/.codex/skills/agent-collab/bin/collab.py` (Codex skill copy)
-  3. `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/0.3.2/skills/agent-collab/bin/collab.py`
-  4. `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/0.3.2/skills/agent-collab/bin/collab.py`
+  3. newest version under `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (`ls | sort -V | tail -1`)
+  4. newest version under `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (same)
 - `COLLAB_ROOT` = the data dir for the bus. **Use a local-disk path** that every
   participating agent shares; default to `$HOME/.collab` so both sides
   deterministically land on the same bus. Pass it as `--root "$COLLAB_ROOT"` on every
@@ -53,6 +56,8 @@ every call:
   locking, and the CLI will say so clearly if the path can't support it.
 - Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires `pip install
   cursor-sdk` and `CURSOR_API_KEY`). See `references/cursor-start.md`.
+- Antigravity watcher adapter: `antigravity-exec.sh` beside `collab.py` (requires `agy`
+  on PATH). See `references/antigravity-start.md`.
 
 Every command is `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" <verb> ...`. Output is
 JSON on stdout; parse it. Errors go to stderr with a non-zero exit code — read them,
@@ -72,7 +77,7 @@ start    --project X [--topic ..] [--goal ..] [--max-rounds 6]
 artifact put --project X --name <name> --file <path> --by <agent>      # -> <name>@vN
 artifact get --project X --name <name> [--version N] [--out <path>]    # prints content (or writes to --out)
 post     --project X --type review_request --round 1 --artifact <name>@v1 (--body <text> | --body-file <f>) [--to broadcast]
-join     --project X
+join     --project X [--role reviewer|approver|observer]               # default reviewer
 projects                                                               # list all (no --project)
 status   --project X
 doctor   --project X                                                   # "what's wrong / next?"
@@ -83,15 +88,18 @@ complete --project X --claim-message <id> --claim-token <tok> --type response (-
             [--blob <path>] [--role <role>] [--idempotency-key <k>]   # --round optional (no default)
 ack      --project X --message <id> --claim-token <tok>                # finish, no reply
 extend   --project X --message <id> --claim-token <tok> [--lease-min 10]
-decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent <id>] [--idempotency-key <k>]
-            # binding; converges + clears this project's pending AND claimed inbox rows
+decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent <id>] [--idempotency-key <k>] [--force]
+            # binding; converges + clears this project's pending AND claimed inbox rows.
+            # BLOCKED until every approver participant has posted an `approval`
+            # message; --force converges anyway (recorded in the output).
 log      --project X [--since N] [--follow]
 delete   --project X --yes
 watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
 ```
 
-Message `--type`: `review_request question response rebuttal proposal decision status heartbeat`
-(only the first five create inbox work; decision/status/heartbeat are log-only).
+Message `--type`: `review_request question response rebuttal proposal approval decision status heartbeat`
+(only the first five create inbox work; approval/decision/status/heartbeat are log-only —
+an `approval` records an approver's sign-off and is what unblocks `decide`).
 
 ## Orient before acting (auto role detection)
 
@@ -117,14 +125,92 @@ numbered list (name — state, participants, last updated), and ask which one. O
 pick, continue with the normal flow (orient with `doctor`). If the list is empty, say
 so and offer to start a new project (which needs a work product).
 
+## Interactive setup wizard (bare invocation)
+
+When the user invokes the skill **bare** — no project name, no file, no reviewers
+(e.g. just "agent-collab", "start a collab", "set up a collab session") — do not ask
+one open-ended question and do not guess. Step them through setup as a short wizard,
+then run the initiator flow with their answers.
+
+Ask in **two grouped rounds**, not a serial interrogation. In Claude Code, use the
+`AskUserQuestion` tool (one call per round, up to 4 questions; `multiSelect` for the
+reviewer question). In harnesses without such a tool, ask the same rounds as two
+compact chat messages.
+
+**Round 1 — the project:**
+
+1. **Work product** — path to the file to review (spec or code). Free-text; there is
+   no default. A project with nothing to review is the #1 failure mode, so this is
+   mandatory.
+2. **Reviewers** (multi-select) — `codex-1`, `copilot-1`, `cursor-1`,
+   `antigravity-1`. Note in the option descriptions: Cursor needs
+   `pip install cursor-sdk` + `CURSOR_API_KEY`; Antigravity needs `agy` on PATH.
+3. **Review focus** — e.g. correctness, security, design/architecture, "tear the
+   premise apart", or free-text.
+4. **Onboarding mode** — (a) *hands-off watchers I launch in the background*
+   (recommended; needs the reviewer CLIs installed locally), (b) *print the watcher
+   commands for the user to run in their own terminals*, or (c) *interactive — the
+   user will open each tool and say "review collab project X" themselves*.
+
+Derive the project name automatically (artifact basename + short date, e.g.
+`spec-review-0714`) and state it; only ask if the user objects or a project with that
+name already exists.
+
+**Round 2 — per selected agent** (one question per agent, batched into one round):
+role, model, and access, phrased as one choice list per agent. Defaults first.
+
+- **Role:** `reviewer` (default — gets inbox work and must respond), `approver`
+  (a reviewer whose explicit sign-off additionally **gates `decide`** — use for a
+  secondary approver whose OK is required before convergence), or `observer`
+  (log-only; no inbox rows). Register non-default roles with
+  `join --agent <id> --role approver|observer` **before** launching that agent's
+  watcher — the watcher's auto-join keeps an existing role. Approvers work
+  hands-off too: the watcher payload tells them they're an approver, and output
+  whose first line is `APPROVED` is posted as an `approval` (anything else posts
+  as a normal response and the gate stays closed). Only ask when it's
+  plausible the user wants a non-reviewer; otherwise default everyone to reviewer
+  and say so.
+- **Model:** offer the default plus 1–2 known alternatives; free-text for anything
+  else. Plumb the choice through the env knob when launching that agent's watcher.
+- **Access:** read-only (default; reviewers should not edit the repo) or
+  edit-capable (`*_READONLY=0`).
+
+Per-agent knobs (set in the watcher's environment; defaults apply when unset):
+
+| Agent | Model knob | Default model | Read-only knob (default on) |
+|---|---|---|---|
+| `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
+| `copilot-1` | `COPILOT_MODEL` | `gpt-5.4` | `COPILOT_READONLY` |
+| `cursor-1` | `CURSOR_MODEL` | `composer-2.5` | `CURSOR_READONLY` |
+| `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
+
+**Then execute** the normal initiator flow — one `review` command (create + snapshot
++ broadcast), `join --role observer` for any observers, and onboard reviewers per the
+chosen mode:
+
+- Mode (a): launch each watcher yourself as a background process, e.g.
+  `COPILOT_MODEL=<choice> COLLAB_WATCH_ARGS="--idle-exit" collab-watch.sh copilot <project> <repo>`
+  (one per reviewer; `--idle-exit` makes a one-shot review; omit it to keep the
+  watcher alive for later rounds). Report each response as it lands.
+- Mode (b): print one ready-to-paste `collab-watch.sh` line per reviewer with the
+  chosen env knobs inlined.
+- Mode (c): tell the user what to say in each tool ("review collab project X as
+  `<agent-id>`").
+
+Finish with the standard offer: wait for responses now (`claim --wait 600`) or come
+back later with "check collab project X". Do not re-run the wizard when the user
+names a project, file, or reviewer in their request — answer only what's missing.
+
 ## Intent → action
 
 | User says | Do |
 |---|---|
+| bare invocation — "agent-collab" / "start a collab" / "set up a collab" (no project, file, or reviewer named) | Run the **interactive setup wizard** above. |
 | "list / what are my collab projects" | Run `projects` and present the list (name, state, participants, last updated). |
 | "join collab project" / "check collab" (no name) | Run `projects`, present the list, and ask which one before doing anything. |
 | "start collab project X" / "collab on X" | Orient with `doctor`; if new, get a work product then start + broadcast; if it exists, join/continue. |
 | "start agent-collab with cursor …" / "collab on X with cursor" | Initiator flow (you = `claude-1` or `codex-1`); after broadcast, onboard **cursor-1** via watcher or interactive Cursor session — follow `references/cursor-start.md` verbatim. |
+| "start collab session with antigravity …" / "start collab with agy …" / "collab on X with antigravity" | Initiator flow (you = `claude-1` or `codex-1`); after broadcast, onboard **antigravity-1** via watcher or interactive Antigravity session — follow `references/antigravity-start.md` verbatim. |
 | "check collab project X" / "any feedback?" | Drain your inbox (claim → act → complete), summarize from the `log`; if nothing's pending, OFFER to wait. |
 | "wait for the review / wait for replies" | Confirm, then block with `claim --project X --wait <sec>` and handle what arrives; loop if they want. Note it ties up the session (watcher is better for walk-away). |
 | "send my feedback / rebuttal to <agent>" | `post` a `rebuttal`/`response` in the existing thread. |
@@ -159,8 +245,11 @@ Once you have the work product:
    - **Cursor:** *"Run `collab-watch.sh cursor X /path/to/repo` (needs
      `pip install cursor-sdk` + `CURSOR_API_KEY`), or in Cursor say 'review collab
      project X' as cursor-1."* — full recipe in `references/cursor-start.md`.
-   Make sure the reviewer uses a different id (`codex-1`, `copilot-1`, or
-   `cursor-1`) and the same `COLLAB_ROOT` (`$COLLAB_ROOT`).
+   - **Antigravity:** *"Run `collab-watch.sh antigravity X /path/to/repo` (or
+     `collab-watch.sh agy X …`), or in Antigravity say 'review collab project X' as
+     antigravity-1."* — full recipe in `references/antigravity-start.md`.
+   Make sure the reviewer uses a different id (`codex-1`, `copilot-1`, `cursor-1`, or
+   `antigravity-1`) and the same `COLLAB_ROOT` (`$COLLAB_ROOT`).
 5. **Then ask whether to wait for feedback now:** *"Want me to wait here for the
    reviewers' responses? I'll block up to ~10 min (this ties up the session), or you can
    come back later and say 'check collab project X'."* Only wait on a yes — then
@@ -209,7 +298,13 @@ Drain your inbox one item at a time. For each:
    `post --parent <response_id>` (a reply inherits its parent's thread).
 3. Where you reject a point, post a `rebuttal` citing the response (`--parent <id>`)
    and give the reason. Let the reviewer concede or counter.
-4. When no open disagreements remain (or you hit the round budget), converge:
+4. If the project has **approvers**, collect their sign-off before converging: each
+   approver posts an `approval` message (`post --type approval`, or
+   `complete --type approval` when draining their inbox). `status`/`doctor` show
+   who still owes one (`approvals`); `decide` refuses while any is missing. If the
+   user explicitly wants to converge without a sign-off, use `decide --force` and
+   say so in the decision body.
+5. When no open disagreements remain (or you hit the round budget), converge:
    ```bash
    echo "Decision: <what was chosen and why>." | python3 "$COLLAB_BIN" \
        --root "$COLLAB_ROOT" decide --project X --from claude-1 \
@@ -240,25 +335,29 @@ agreement theater. Hold yourself and the loop to this:
 - Reference artifacts as `name@version`, never "the latest" — versions are immutable.
 - Keep replies in their thread so the convergence history stays coherent.
 
-## Bringing in Codex / Copilot / Cursor as hands-off reviewers
+## Bringing in Codex / Copilot / Cursor / Antigravity as hands-off reviewers
 
 Other agents don't have to be babysat. Tell the user they can run a watcher in a
-separate terminal so Codex/Copilot/Cursor pick up review requests automatically:
+separate terminal so Codex/Copilot/Cursor/Antigravity pick up review requests automatically:
 
 ```bash
 # Launcher (resolves collab.py + adapter paths):
-"${COLLAB_BIN%/collab.py}/collab-watch.sh" codex   X /path/to/repo
-"${COLLAB_BIN%/collab.py}/collab-watch.sh" copilot X /path/to/repo
-"${COLLAB_BIN%/collab.py}/collab-watch.sh" cursor  X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" codex        X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" copilot      X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" cursor       X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" antigravity  X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" agy          X /path/to/repo
 
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
 # Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 --exec "${COLLAB_BIN%/collab.py}/cursor-exec.sh"
+# Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent antigravity-1 --exec "${COLLAB_BIN%/collab.py}/antigravity-exec.sh"
 ```
 
-See `references/watchers.md` and `references/cursor-start.md` for details.
+See `references/watchers.md`, `references/cursor-start.md`, and `references/antigravity-start.md` for details.
 
 ## Watching and reporting
 
@@ -272,6 +371,8 @@ See `references/watchers.md` and `references/cursor-start.md` for details.
 
 `review_request` (ask for review) · `question` (a specific question) · `response`
 (answer/critique) · `proposal` (a revised version + accept/reject ledger) ·
-`rebuttal` (disagree with a response, with reason) · `decision` (binding, converges
-the project) · `status`/`heartbeat` (informational, no reply expected). Only the
-first five create work items in an inbox; decisions and status are log-only.
+`rebuttal` (disagree with a response, with reason) · `approval` (an approver's
+binding sign-off — required from every approver before `decide` will converge) ·
+`decision` (binding, converges the project) · `status`/`heartbeat` (informational,
+no reply expected). Only the first five create work items in an inbox; approval,
+decisions, and status are log-only.

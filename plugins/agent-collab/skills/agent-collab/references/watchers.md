@@ -1,6 +1,6 @@
 # Hands-off reviewers (the watcher)
 
-`collab watch` is how Codex or Copilot review automatically, without a human relaying
+`collab watch` is how Codex, Copilot, Cursor, or Antigravity review automatically, without a human relaying
 messages. A small loop *outside* the agent polls the bus, claims work, invokes the
 agent **single-shot** with the claimed message fed on **stdin** (an argv list — never
 interpolated into a shell, so no injection), captures the agent's stdout, and posts it
@@ -23,6 +23,9 @@ python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-to
 
 # Cursor (Cursor Agent SDK via cursor-exec.sh; reads stdin JSON like Codex):
 python3 "$BIN" watch --project X --agent cursor-1 --exec /path/to/cursor-exec.sh
+
+# Antigravity (agy --print via antigravity-exec.sh; prompt-as-arg like Copilot):
+python3 "$BIN" watch --project X --agent antigravity-1 --exec /path/to/antigravity-exec.sh
 ```
 
 Everything after `--exec` is the agent's command + args. By default the claimed message
@@ -36,6 +39,7 @@ The packaged launcher wraps these defaults:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" codex X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" cursor X /path/to/repo
+"${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" antigravity X /path/to/repo
 ```
 
 For Codex, the launcher defaults `COLLAB_CODEX_EXEC_ARGS` to
@@ -46,6 +50,10 @@ example `COLLAB_CODEX_EXEC_ARGS="" ... collab-watch.sh codex X` for plain
 For Cursor, install `cursor-sdk` (`pip install cursor-sdk`) and set `CURSOR_API_KEY`.
 Read-only by default (`CURSOR_READONLY=1` → `plan` mode). Override model with
 `CURSOR_MODEL` (default `composer-2.5`).
+
+For Antigravity, ensure `agy` is on PATH. Read-only by default
+(`ANTIGRAVITY_READONLY=1` → `--mode plan`). Override model with `ANTIGRAVITY_MODEL` or
+`AGY_MODEL`.
 
 ## Flags
 

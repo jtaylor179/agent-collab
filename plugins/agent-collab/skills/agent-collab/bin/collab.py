@@ -25,6 +25,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -32,13 +33,18 @@ import uuid
 from datetime import datetime, timezone
 
 DEFAULT_LEASE_MIN = 10
-ROLES = ("initiator", "reviewer", "observer")
+ROLES = ("initiator", "reviewer", "approver", "observer")
+# Roles that receive broadcast fan-out and late-join backfill. An approver is a
+# reviewer whose sign-off additionally gates decide(); an observer gets neither
+# inbox work nor a vote.
+FANOUT_ROLES = ("reviewer", "approver")
 MSG_TYPES = (
     "question", "review_request", "response", "rebuttal",
-    "proposal", "decision", "status", "heartbeat",
+    "proposal", "approval", "decision", "status", "heartbeat",
 )
 # Only these create work-queue (inbox) rows requiring a claim+complete/ack.
-# decision/status/heartbeat are log-only notifications consumed by reading the log.
+# approval/decision/status/heartbeat are log-only notifications consumed by reading
+# the log (an approval records sign-off; it demands no work from anyone else).
 ACTIONABLE = ("question", "review_request", "response", "rebuttal", "proposal")
 
 SCHEMA = """
@@ -224,13 +230,13 @@ class Store:
         # already the project's initiator means two different tools share one agent id
         # (e.g. both defaulted to claude-1). Nothing would route — refuse loudly instead
         # of registering a self-collision that looks fine until wait/claim is always empty.
-        if existing and existing["role"] == "initiator" and role == "reviewer":
+        if existing and existing["role"] == "initiator" and role in FANOUT_ROLES:
             raise CollabError(
                 f"'{agent}' is already the INITIATOR of '{project}', so it cannot also "
-                "join as a reviewer. This almost always means two tools are using the "
+                f"join as a {role}. This almost always means two tools are using the "
                 f"SAME agent id ('{agent}'). Give the reviewer a DISTINCT id: set "
                 "COLLAB_AGENT (claude-1 for Claude, codex-1 for Codex, copilot-1 for "
-                "Copilot, cursor-1 for Cursor) in the reviewer's environment, then join again. If you ARE the "
+                "Copilot, cursor-1 for Cursor, antigravity-1 for Antigravity) in the reviewer's environment, then join again. If you ARE the "
                 "initiator, you don't need to join — just check the project.")
         effective_role = existing["role"] if existing else role
         with self.write_tx():
@@ -240,7 +246,7 @@ class Store:
                 "last_heartbeat=excluded.last_heartbeat",
                 (project, agent, effective_role, ts),
             )
-            if effective_role == "reviewer" and p["state"] != "converged":
+            if effective_role in FANOUT_ROLES and p["state"] != "converged":
                 ph = ",".join("?" * len(ACTIONABLE))
                 rows = self.conn.execute(
                     f"SELECT m.message_id FROM messages m WHERE m.project=? "
@@ -349,9 +355,10 @@ class Store:
     def _recipients(self, project, from_agent, to_agent):
         if to_agent and to_agent != "broadcast":
             return [to_agent]
-        # broadcast => every reviewer except the sender
-        rows = self.participants(project, role="reviewer")
-        return [r["agent_id"] for r in rows if r["agent_id"] != from_agent]
+        # broadcast => every reviewer/approver except the sender (observers are log-only)
+        rows = self.participants(project)
+        return [r["agent_id"] for r in rows
+                if r["role"] in FANOUT_ROLES and r["agent_id"] != from_agent]
 
     def _insert_message(self, project, from_agent, to_agent, mtype, body,
                         thread_id=None, round_=None, parent=None,
@@ -687,13 +694,38 @@ class Store:
             )
         return {"message_id": mid, "duplicate": dup, "completed": claim_message_id}
 
+    def _approval_status(self, project):
+        """Map each approver participant -> whether they have posted an approval."""
+        approvers = [r["agent_id"]
+                     for r in self.participants(project, role="approver")]
+        if not approvers:
+            return {}
+        rows = self.conn.execute(
+            "SELECT DISTINCT from_agent FROM messages "
+            "WHERE project=? AND type='approval'", (project,),
+        ).fetchall()
+        approved = {r["from_agent"] for r in rows}
+        return {a: (a in approved) for a in approvers}
+
     def decide(self, project, from_agent, body, thread_id=None, parent=None,
-               idempotency_key=None):
+               idempotency_key=None, force=False):
         """Initiator posts the binding decision and converges the project.
 
         Pass --thread/--parent to attach the decision to the thread it closes so
         the log threads cleanly; the project-level state also flips to converged.
+
+        If the project has approver participants, every one of them must have
+        posted an `approval` message first — otherwise decide refuses. `force=True`
+        converges anyway (the returned dict records that the gate was overridden).
         """
+        approvals = self._approval_status(project)
+        missing = sorted(a for a, ok in approvals.items() if not ok)
+        if missing and not force:
+            raise CollabError(
+                "decide blocked: approver(s) have not signed off yet: "
+                f"{', '.join(missing)}. Each approver must post an 'approval' "
+                "message (`post --type approval`, or `complete --type approval` "
+                "when draining their inbox). Pass --force to converge anyway.")
         with self.write_tx():
             mid, dup = self._insert_message(
                 project, from_agent, "broadcast", "decision", body,
@@ -711,8 +743,13 @@ class Store:
                 "AND message_id IN (SELECT message_id FROM messages WHERE project=?)",
                 (project,),
             )
-        return {"message_id": mid, "duplicate": dup, "state": "converged",
-                "closed_deliveries": cur.rowcount}
+        out = {"message_id": mid, "duplicate": dup, "state": "converged",
+               "closed_deliveries": cur.rowcount}
+        if approvals:
+            out["approvals"] = approvals
+            if missing:
+                out["forced_over_missing_approvals"] = missing
+        return out
 
     def log(self, project, since_seq=0, actionable_only=False, to_agent=None,
             from_agent=None):
@@ -782,6 +819,8 @@ class Store:
                  "type": r["type"], "deliveries": r["deliveries"]} for r in stalled
             ],
             "open_threads": [r["thread_id"] for r in open_threads],
+            # {} when the project has no approvers; otherwise agent -> approved?
+            "approvals": self._approval_status(project),
         }
 
     def list_projects(self):
@@ -838,7 +877,8 @@ class Store:
                  "(a local-disk path) and each a DISTINCT agent id.")
         if not agent:
             h.append("No agent identity resolved. Set COLLAB_AGENT (e.g. claude-1 for "
-                     "Claude, codex-1 for Codex, copilot-1 for Copilot, cursor-1 for Cursor) or pass --agent.")
+                     "Claude, codex-1 for Codex, copilot-1 for Copilot, cursor-1 for Cursor, "
+                     "antigravity-1 for Antigravity) or pass --agent.")
         if not exists:
             h.append(f"Project '{project}' does not exist yet. To start it you must "
                      "provide a work product to review (a file). Starting from just a "
@@ -873,8 +913,18 @@ class Store:
         if out["pending_for_you"]:
             h.append(f"You have {out['pending_for_you']} item(s) to handle: claim each, "
                      "read the referenced artifact, and respond/complete.")
-        elif mine and mine["role"] == "reviewer":
+        elif mine and mine["role"] in FANOUT_ROLES:
             h.append("Nothing pending for you right now.")
+        approvals = self._approval_status(project)
+        out["approvals"] = approvals
+        missing = sorted(a for a, ok in approvals.items() if not ok)
+        if missing and out["state"] != "converged":
+            h.append("decide is gated: approver(s) have not signed off yet: "
+                     f"{', '.join(missing)}. Each must post an 'approval' message "
+                     "(post --type approval, or complete --type approval).")
+            if agent in missing:
+                h.append("You are one of the missing approvers — post your approval "
+                         "when you're satisfied, or a response with your objections.")
         return out
 
 
@@ -894,20 +944,41 @@ def _agent_payload(store, project, agent, claimed):
             artifact = {"ref": ref, "content": data.decode("utf-8", "replace")}
         except (CollabError, ValueError) as e:
             artifact = {"ref": ref, "error": str(e)}
+    instructions = (
+        f"You are {agent}, an AI reviewer collaborating with other agents over a "
+        "shared bus. Read the message and the referenced artifact, then write ONLY "
+        "your review to stdout as plain text. Lead with your strongest substantive "
+        "objection; if you genuinely agree, say specifically why and name the one "
+        "thing you would still change. You are reviewing the GOAL, not just the "
+        "artifact as written: if you think the whole approach is wrong, say so "
+        "plainly and propose the alternative — challenging the premise is in scope, "
+        "not only refining the details. No preamble, no sign-off.")
+    me = next((r for r in store.participants(project)
+               if r["agent_id"] == agent), None)
+    if me and me["role"] == "approver":
+        instructions += (
+            " ADDITIONALLY: you are an APPROVER on this project — the initiator "
+            "cannot converge until you formally sign off. If (and only if) you are "
+            "satisfied and formally approve, make the FIRST line of your output "
+            "exactly 'APPROVED', then your reasoning. If you have any remaining "
+            "objection, do NOT write APPROVED — state the objection instead; you "
+            "will be asked again on a later round.")
     return json.dumps({
-        "instructions": (
-            f"You are {agent}, an AI reviewer collaborating with other agents over a "
-            "shared bus. Read the message and the referenced artifact, then write ONLY "
-            "your review to stdout as plain text. Lead with your strongest substantive "
-            "objection; if you genuinely agree, say specifically why and name the one "
-            "thing you would still change. You are reviewing the GOAL, not just the "
-            "artifact as written: if you think the whole approach is wrong, say so "
-            "plainly and propose the alternative — challenging the premise is in scope, "
-            "not only refining the details. No preamble, no sign-off."),
+        "instructions": instructions,
         "message": {k: claimed.get(k) for k in (
             "type", "from_agent", "round", "body", "thread_id", "parent_message_id")},
         "artifact": artifact,
     }, indent=2)
+
+
+def _signals_approval(text):
+    """True iff the first non-empty line of the agent's output is an APPROVED
+    marker. Only honored for participants whose role is 'approver'."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return bool(re.match(r"APPROVED\b", line, re.IGNORECASE))
+    return False
 
 
 PAYLOAD_PLACEHOLDER = "{}"
@@ -992,6 +1063,8 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
             # almost always the same-id-as-initiator collision; surface and stop
             print(f"[watch] cannot start: {e}", file=log_fh, flush=True)
             return 0
+    my_role = next((r["role"] for r in store.participants(project)
+                    if r["agent_id"] == agent), "reviewer")
     processed = 0
     while True:
         claimed = store.claim(project, agent, lease_min)
@@ -1035,10 +1108,17 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
                 break
             continue
 
+        # An approver's watcher can sign off hands-off: when the agent's output
+        # leads with the APPROVED marker, post it as an `approval` (which is what
+        # unblocks decide) instead of a plain response. Reviewers' output is never
+        # promoted — the marker only means something from an approver.
+        mtype = reply_type
+        if my_role == "approver" and _signals_approval(review):
+            mtype = "approval"
         try:
-            store.complete(project, agent, cm, tok, reply_type, review,
+            store.complete(project, agent, cm, tok, mtype, review,
                            round_=rnd, parent=cm,
-                           idempotency_key=f"{agent}:{reply_type}:{cm}:r{rnd}")
+                           idempotency_key=f"{agent}:{mtype}:{cm}:r{rnd}")
         except CollabError as e:
             # If the thread converged mid-review, decide() already marked this row done
             # (terminal). It will NOT be redelivered, so don't claim it will be.
@@ -1052,7 +1132,8 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
             if once:
                 break
             continue
-        print(f"[watch] {agent} responded to {cm[:8]}", file=log_fh, flush=True)
+        verb = "APPROVED" if mtype == "approval" else "responded to"
+        print(f"[watch] {agent} {verb} {cm[:8]}", file=log_fh, flush=True)
         processed += 1
         if once or (max_items and processed >= max_items):
             break
@@ -1196,6 +1277,8 @@ def build_parser():
 
     s = sub.add_parser("decide", help="post binding decision, converge project")
     s.add_argument("--project", required=True)
+    s.add_argument("--force", action="store_true",
+                   help="converge even if approvers have not signed off")
     s.add_argument("--from", dest="from_agent", default=os.environ.get("COLLAB_AGENT"),
                    help="sender id; defaults to $COLLAB_AGENT")
     s.add_argument("--thread", dest="thread_id", help="thread this decision closes")
@@ -1301,7 +1384,8 @@ def main(argv=None):
     NEED_FROM = {"post", "complete", "decide"}
     if args.cmd in NEED_AGENT and not getattr(args, "agent", None):
         print(json.dumps({"error": "no agent identity: pass --agent or set "
-                          "COLLAB_AGENT (e.g. claude-1 for Claude, codex-1 for Codex, cursor-1 for Cursor)"}),
+                          "COLLAB_AGENT (e.g. claude-1 for Claude, codex-1 for Codex, "
+                          "copilot-1 for Copilot, cursor-1 for Cursor, antigravity-1 for Antigravity)"}),
               file=sys.stderr)
         return 1
     if args.cmd in NEED_FROM and not getattr(args, "from_agent", None):
@@ -1368,7 +1452,7 @@ def main(argv=None):
         elif cmd == "decide":
             _emit(store.decide(args.project, args.from_agent, _read_body(args),
                                thread_id=args.thread_id, parent=args.parent,
-                               idempotency_key=args.idem))
+                               idempotency_key=args.idem, force=args.force))
         elif cmd == "state":
             if args.set_state:
                 store.set_state(args.project, args.set_state)

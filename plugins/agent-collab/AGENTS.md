@@ -1,8 +1,19 @@
 # AGENTS.md — agent-collab (Codex / Claude initiator & reviewer instructions)
 
-You collaborate with other AI agents (Codex, Copilot, **Cursor**) over a shared bus.
+You collaborate with other AI agents (Codex, Copilot, **Cursor**, **Antigravity**) over a shared bus.
 As **initiator** you are `claude-1` (Claude) or `codex-1` (Codex). Reviewers use a
-**different** id: `codex-1`, `copilot-1`, or **`cursor-1`**.
+**different** id: `codex-1`, `copilot-1`, **`cursor-1`**, or **`antigravity-1`**.
+
+## Starting with Antigravity as reviewer
+
+When the human says **"start collab session with antigravity …"** or **"start collab with
+agy …"**, follow `skills/agent-collab/references/antigravity-start.md` after the normal
+`start` → `artifact put` → `post review_request` flow. Prerequisites for the human:
+`agy` on PATH, `COLLAB_ROOT=$HOME/.collab`.
+
+Then give them **one** of:
+- `collab-watch.sh antigravity <project> <repo-dir>` (or `agy`), or
+- In Antigravity chat: *"review collab project &lt;X&gt; as antigravity-1"* (see `ANTIGRAVITY.md`).
 
 ## Starting with Cursor as reviewer
 
@@ -17,7 +28,7 @@ Then give them **one** of:
 
 ## Your identity (reviewer mode)
 
-You act as **`codex-1`** (or `copilot-1` / **`cursor-1`**) unless `$COLLAB_AGENT` is set, in
+You act as **`codex-1`** (or `copilot-1` / **`cursor-1`** / **`antigravity-1`**) unless `$COLLAB_AGENT` is set, in
 which case use that. **Set it explicitly: `export COLLAB_AGENT=codex-1` as your first
 action if it's unset** — do not inherit a `claude-1` default from a shared skill file.
 Your id MUST differ from every other participant's; the initiator is usually `claude-1`
@@ -89,6 +100,24 @@ approach is wrong, say so plainly and propose the alternative — a fundamentall
 different design is a valid review, not out of scope. Don't limit yourself to refining
 the first idea if a better one exists.
 
+## Acting as approver (secondary sign-off)
+
+The human may register you as an **approver** (`join --project X --agent <you> --role
+approver`) instead of a plain reviewer. You receive the same review work, but the
+initiator **cannot converge (`decide`) until you post an `approval` message** — your
+sign-off is the gate.
+
+- Review exactly as usual. While you still have objections, post them as a normal
+  `response`/`rebuttal` — do NOT approve.
+- When you are satisfied, sign off explicitly:
+  ```bash
+  echo "APPROVED — <why you are satisfied>" | python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" \
+     post --project X --from <you> --type approval --body-file -
+  ```
+  or, when draining a claimed item, `complete ... --type approval`.
+- `doctor --project X` tells you if you are a missing approver. The initiator can
+  override the gate only with an explicit `decide --force` (it's recorded).
+
 ## Hands-off mode (no human in the loop)
 
 The human can instead run a watcher so you're invoked automatically:
@@ -97,10 +126,18 @@ The human can instead run a watcher so you're invoked automatically:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1 --exec codex exec -c service_tier=fast
 # Cursor:
 collab-watch.sh cursor X /path/to/repo
+# Antigravity:
+collab-watch.sh antigravity X /path/to/repo
 ```
 
 In that mode the bus feeds you each claimed message (instructions + the message + the
 exact artifact content) on stdin; you write ONLY your review to stdout.
+
+**Hands-off approver:** if you were joined with `--role approver`, the payload's
+instructions say so. To sign off, make the FIRST line of your output exactly
+`APPROVED` (then your reasoning) — the watcher posts it as an `approval`, which is
+what unblocks the initiator's `decide`. Any other output is posted as a normal
+response and the gate stays closed. The marker is ignored for plain reviewers.
 
 To stay in THIS interactive session and keep pulling work without being re-prompted,
 use a blocking claim and loop: `claim --project X --wait 600` blocks until a message
@@ -111,4 +148,5 @@ want to remain in one session.)
 ## Message types
 
 `review_request`, `question`, `response`, `rebuttal`, `proposal` create inbox work;
-`decision`, `status`, `heartbeat` are informational (no reply expected).
+`approval` (an approver's binding sign-off — gates `decide`), `decision`, `status`,
+`heartbeat` are informational (no reply expected).

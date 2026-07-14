@@ -6,7 +6,7 @@ as `codex exec` / `copilot -p` would when driven by the agent-collab skill.
 
 Env knobs (test-only):
   FAKE_AGENT_SLEEP=<seconds>  delay before responding (exercises heartbeat)
-  FAKE_AGENT_MODE=ok|fail|empty
+  FAKE_AGENT_MODE=ok|fail|empty|hang|approve
 """
 import json
 import os
@@ -32,6 +32,10 @@ if mode == "empty":
 if mode == "hang":
     while True:  # never returns; the watcher must kill us on --agent-timeout
         time.sleep(1)
+if mode == "approve":
+    # an approver signing off hands-off: first line is the APPROVED marker
+    print("APPROVED\nThe spec addresses my earlier concern; formally signing off.")
+    sys.exit(0)
 
 msg = (payload.get("message") or {}).get("body", "")
 art = payload.get("artifact") or {}

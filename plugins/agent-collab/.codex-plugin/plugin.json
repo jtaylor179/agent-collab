@@ -1,6 +1,6 @@
 {
   "name": "agent-collab",
-  "version": "0.3.3",
+  "version": "0.3.6",
   "description": "Collaborate with other AI agents on a shared spec or codebase through a durable message bus. Join a collab project, review work products, and converge on a shared design. Bundles the agent-collab skill and the collab CLI.",
   "author": {
     "name": "Jeff Taylor"
@@ -16,7 +16,7 @@
   "interface": {
     "displayName": "Agent Collab",
     "shortDescription": "Multi-agent collaboration over a durable message bus",
-    "longDescription": "Collaborate with other AI agents (Claude, Codex, Copilot, Cursor) on a shared spec or codebase through a durable message bus. Join a collab project, review the work product, disagree and reconcile, and converge on a shared design — without a human relaying messages between tools.",
+    "longDescription": "Collaborate with other AI agents (Claude, Codex, Copilot, Cursor, Antigravity) on a shared spec or codebase through a durable message bus. Join a collab project, review the work product, disagree and reconcile, and converge on a shared design \u2014 without a human relaying messages between tools.",
     "developerName": "Jeff Taylor",
     "category": "Productivity",
     "capabilities": [

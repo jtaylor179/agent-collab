@@ -2,13 +2,14 @@
 description: Launch a hands-off watcher so another agent (Copilot/Codex/Cursor) auto-reviews queued requests
 ---
 
-The user wants to start the **watcher daemon** so another AI agent (Copilot, Codex, or
-**Cursor**) automatically picks up and answers review requests on the bus — without
+The user wants to start the **watcher daemon** so another AI agent (Copilot, Codex,
+**Cursor**, or **Antigravity / agy**) automatically picks up and answers review requests on the bus — without
 anyone copy/pasting. Use the `agent-collab` skill.
 
-`$ARGUMENTS` should contain: which agent (`copilot`, `codex`, or **`cursor`**), the
+`$ARGUMENTS` should contain: which agent (`copilot`, `codex`, **`cursor`**, **`antigravity`**, or **`agy`**), the
 project name, and optionally a repo directory. Examples: `copilot context-compaction`,
-`codex my-project /path/to/repo`, **`cursor a5-phrase-level-keys /path/to/repo`**.
+`codex my-project /path/to/repo`, **`cursor a5-phrase-level-keys /path/to/repo`**,
+**`agy my-project /path/to/repo`**.
 
 If the agent or project is missing, ask — do not guess the project name.
 
@@ -22,9 +23,11 @@ Steps:
      `COLLAB_CODEX_EXEC_ARGS`.
    - **Cursor:** `cursor-exec.sh` → `cursor_sdk` (stdin). Requires `pip install
      cursor-sdk` and `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1`).
+   - **Antigravity:** `antigravity-exec.sh` → `agy --print` (prompt-as-arg). Requires
+     `agy` on PATH. Read-only by default (`ANTIGRAVITY_READONLY=1` → `--mode plan`).
 2. **Run it in the background** (long-running daemon). Report agent/project/root and how
    to stop it.
 3. Optional: `COLLAB_WATCH_ARGS="--idle-exit"` to drain the queue then exit.
-4. Distinct ids: `copilot-1` / `codex-1` / **`cursor-1`** — never the initiator's id.
+4. Distinct ids: `copilot-1` / `codex-1` / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
 
 After launching, suggest `/collab-status <project>` or `log --follow`.

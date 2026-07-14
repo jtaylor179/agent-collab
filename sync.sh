@@ -67,6 +67,7 @@ mkdir -p "$CODEX_DEST"
 cp -R "$PLUGIN/skills/agent-collab/." "$CODEX_DEST/"
 cp "$PLUGIN/AGENTS.md" "$CODEX_DEST/AGENTS.md"
 cp "$PLUGIN/CURSOR.md" "$CODEX_DEST/CURSOR.md" 2>/dev/null || true
+cp "$PLUGIN/ANTIGRAVITY.md" "$CODEX_DEST/ANTIGRAVITY.md" 2>/dev/null || true
 python3 "$CODEX_DEST/bin/collab.py" --help >/dev/null && echo "synced legacy Codex skill fallback -> $CODEX_DEST"
 
 # --- Copilot: sync the global skill copy used by GitHub Copilot-style agents ---
@@ -76,6 +77,7 @@ mkdir -p "$COPILOT_DEST"
 cp -R "$PLUGIN/skills/agent-collab/." "$COPILOT_DEST/"
 cp "$PLUGIN/AGENTS.md" "$COPILOT_DEST/AGENTS.md"
 cp "$PLUGIN/CURSOR.md" "$COPILOT_DEST/CURSOR.md" 2>/dev/null || true
+cp "$PLUGIN/ANTIGRAVITY.md" "$COPILOT_DEST/ANTIGRAVITY.md" 2>/dev/null || true
 if ! head -1 "$COPILOT_DEST/SKILL.md" | grep -q "Copilot install"; then
   printf '%s\n\n%s\n' \
     "> **Copilot install:** your identity here is \`copilot-1\` unless \$COLLAB_AGENT is set. Never act as \`claude-1\`." \
@@ -90,6 +92,7 @@ echo "   Claude session:  export COLLAB_AGENT=claude-1"
 echo "   Codex  session:  export COLLAB_AGENT=codex-1"
 echo "   Copilot session: export COLLAB_AGENT=copilot-1"
 echo "   Cursor session:  export COLLAB_AGENT=cursor-1"
+echo "   Antigravity:     export COLLAB_AGENT=antigravity-1"
 echo " Both must share:   export COLLAB_ROOT=\$HOME/.collab"
 echo " Two tools sharing one id is the #1 failure — nothing routes."
 echo "=============================================================="
