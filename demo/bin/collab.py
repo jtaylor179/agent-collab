@@ -33,19 +33,36 @@ import uuid
 from datetime import datetime, timezone
 
 DEFAULT_LEASE_MIN = 10
-ROLES = ("initiator", "reviewer", "approver", "observer")
-# Roles that receive broadcast fan-out and late-join backfill. An approver is a
-# reviewer whose sign-off additionally gates decide(); an observer gets neither
-# inbox work nor a vote.
+ROLES = ("initiator", "reviewer", "approver", "observer", "worker", "orchestrator")
+# Roles that receive broadcast fan-out and late-join backfill of REVIEW-type work. An
+# approver is a reviewer whose sign-off additionally gates decide() and is the ONLY role
+# that may accept a task (post `approval`); an observer gets neither inbox work nor a vote.
 FANOUT_ROLES = ("reviewer", "approver")
+# Roles that receive broadcast fan-out of TASK-type work (the interchangeable worker pool
+# that pulls from a plan's shared queue). An orchestrator owns the plan: it posts tasks
+# and is the sole caller of the plan's convergence decide(); it is not itself a worker.
+WORKER_ROLES = ("worker",)
 MSG_TYPES = (
-    "question", "review_request", "response", "rebuttal",
+    "question", "review_request", "task", "response", "rebuttal",
     "proposal", "approval", "decision", "status", "heartbeat",
 )
 # Only these create work-queue (inbox) rows requiring a claim+complete/ack.
 # approval/decision/status/heartbeat are log-only notifications consumed by reading
 # the log (an approval records sign-off; it demands no work from anyone else).
-ACTIONABLE = ("question", "review_request", "response", "rebuttal", "proposal")
+# `task` is a unit of work to DO (claimed by a worker); the review types are work to REVIEW.
+ACTIONABLE = ("question", "review_request", "task", "response", "rebuttal", "proposal")
+
+# Acceptance policy for an orchestrated plan — when is a `task` "accepted"?
+#   any        -> any one trusted reviewer (approver) approving accepts it (default)
+#   all        -> every approver must approve it
+#   final:<id> -> only approver <id>'s approval accepts it (a designated final reviewer)
+def _valid_policy(policy):
+    if policy in ("any", "all"):
+        return policy
+    if isinstance(policy, str) and policy.startswith("final:") and policy[6:].strip():
+        return policy
+    raise CollabError(
+        f"invalid accept-policy '{policy}': use 'any', 'all', or 'final:<agent-id>'.")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -53,6 +70,7 @@ CREATE TABLE IF NOT EXISTS projects (
   state TEXT NOT NULL DEFAULT 'open',
   next_seq INTEGER NOT NULL DEFAULT 1,
   max_rounds INTEGER DEFAULT 6,
+  accept_policy TEXT DEFAULT 'any',
   created_at TEXT, updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS participants (
@@ -158,6 +176,7 @@ class Store:
             except sqlite3.OperationalError:
                 self.conn.execute("PRAGMA journal_mode=DELETE")
                 self.conn.executescript(SCHEMA)
+            self._migrate()
         except sqlite3.OperationalError as e:
             # neither mode worked => the filesystem doesn't support SQLite file
             # locking at all (common with some network/FUSE/synced mounts).
@@ -168,6 +187,15 @@ class Store:
                 "COLLAB_ROOT at a local-disk path, e.g. "
                 "export COLLAB_ROOT=\"$HOME/.collab\"."
             )
+
+    def _migrate(self):
+        """Idempotent, additive schema migrations for DBs created before a column
+        existed (CREATE TABLE IF NOT EXISTS won't add columns to an existing table).
+        Safe to run on every open."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(projects)")}
+        if "accept_policy" not in cols:
+            self.conn.execute(
+                "ALTER TABLE projects ADD COLUMN accept_policy TEXT DEFAULT 'any'")
 
     def close(self):
         with contextlib.suppress(Exception):
@@ -193,7 +221,9 @@ class Store:
             raise CollabError(f"unknown project: {project}")
         return row
 
-    def start(self, project, topic, goal, agent, role="initiator", max_rounds=6):
+    def start(self, project, topic, goal, agent, role="initiator", max_rounds=6,
+              accept_policy="any"):
+        accept_policy = _valid_policy(accept_policy)
         ts = now_iso()
         with self.write_tx():
             exists = self.conn.execute(
@@ -203,15 +233,27 @@ class Store:
                 raise CollabError(f"project already exists: {project}")
             self.conn.execute(
                 "INSERT INTO projects(name,topic,goal,state,next_seq,max_rounds,"
-                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (project, topic, goal, "gathering", 1, max_rounds, ts, ts),
+                "accept_policy,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (project, topic, goal, "gathering", 1, max_rounds, accept_policy, ts, ts),
             )
             self.conn.execute(
                 "INSERT INTO participants(project,agent_id,role,last_heartbeat) "
                 "VALUES(?,?,?,?)",
                 (project, agent, role, ts),
             )
-        return {"project": project, "state": "gathering", "initiator": agent}
+        return {"project": project, "state": "gathering", "initiator": agent,
+                "accept_policy": accept_policy}
+
+    def set_accept_policy(self, project, policy):
+        """Change who the trusted-reviewer acceptance requires: any | all | final:<id>.
+        Governs when a task is `accepted` and thus when the plan can converge."""
+        self.get_project(project)
+        policy = _valid_policy(policy)
+        with self.write_tx():
+            self.conn.execute(
+                "UPDATE projects SET accept_policy=?, updated_at=? WHERE name=?",
+                (policy, now_iso(), project))
+        return {"project": project, "accept_policy": policy}
 
     def join(self, project, agent, role="reviewer"):
         """Register a participant. A reviewer joining AFTER a broadcast still needs
@@ -246,8 +288,14 @@ class Store:
                 "last_heartbeat=excluded.last_heartbeat",
                 (project, agent, effective_role, ts),
             )
-            if effective_role in FANOUT_ROLES and p["state"] != "converged":
-                ph = ",".join("?" * len(ACTIONABLE))
+            # Backfill the open broadcasts this role is entitled to: workers get `task`s,
+            # reviewers/approvers get the review types. Fanout is by type (see
+            # _recipients), so backfill must mirror it or a late joiner misses its work.
+            backfill_types = (("task",) if effective_role in WORKER_ROLES
+                              else tuple(t for t in ACTIONABLE if t != "task")
+                              if effective_role in FANOUT_ROLES else ())
+            if backfill_types and p["state"] != "converged":
+                ph = ",".join("?" * len(backfill_types))
                 rows = self.conn.execute(
                     f"SELECT m.message_id FROM messages m WHERE m.project=? "
                     f"AND m.to_agent='broadcast' AND m.type IN ({ph}) "
@@ -256,7 +304,7 @@ class Store:
                     f"  SELECT thread_id FROM messages WHERE project=? AND type='decision') "
                     f"AND NOT EXISTS (SELECT 1 FROM inbox i "
                     f"  WHERE i.message_id=m.message_id AND i.recipient=?)",
-                    (project, *ACTIONABLE, agent, project, agent),
+                    (project, *backfill_types, agent, project, agent),
                 ).fetchall()
                 for r in rows:
                     self.conn.execute(
@@ -352,19 +400,43 @@ class Store:
         return row, data
 
     # -- messaging ----------------------------------------------------------
-    def _recipients(self, project, from_agent, to_agent):
+    def _recipients(self, project, from_agent, to_agent, mtype=None):
         if to_agent and to_agent != "broadcast":
             return [to_agent]
-        # broadcast => every reviewer/approver except the sender (observers are log-only)
+        # Broadcast fan-out is BY TYPE: a `task` goes to the interchangeable worker pool
+        # (any worker can pick it up); every other actionable type goes to reviewers/
+        # approvers. Observers get neither. The sender never receives its own broadcast.
+        target_roles = WORKER_ROLES if mtype == "task" else FANOUT_ROLES
         rows = self.participants(project)
         return [r["agent_id"] for r in rows
-                if r["role"] in FANOUT_ROLES and r["agent_id"] != from_agent]
+                if r["role"] in target_roles and r["agent_id"] != from_agent]
+
+    def _role_of(self, project, agent):
+        row = self.conn.execute(
+            "SELECT role FROM participants WHERE project=? AND agent_id=?",
+            (project, agent),
+        ).fetchone()
+        return row["role"] if row else None
+
+    def _assert_can_approve(self, project, from_agent):
+        """The trusted-reviewer gate (FR2): only an `approver` may accept work by posting
+        an `approval`. A worker, orchestrator, plain reviewer, or non-participant cannot —
+        so an agent can never certify its own (or anyone's) task. Enforced in the bus, not
+        by orchestrator convention, because 'who is trusted to accept' is a trust boundary."""
+        r = self._role_of(project, from_agent)
+        if r != "approver":
+            raise CollabError(
+                f"'{from_agent}' (role: {r or 'not a participant'}) may not post an "
+                "'approval': only an approver (a trusted reviewer) can accept work. "
+                "Join the trusted reviewer as `--role approver`.")
 
     def _insert_message(self, project, from_agent, to_agent, mtype, body,
                         thread_id=None, round_=None, parent=None,
                         refs=None, idempotency_key=None, role=None):
         """Insert a message + its inbox rows. MUST be called inside write_tx().
         Returns (message_id, was_duplicate)."""
+        if mtype == "approval":
+            self._assert_can_approve(project, from_agent)
         if idempotency_key:
             dup = self.conn.execute(
                 "SELECT * FROM messages WHERE project=? AND idempotency_key=?",
@@ -413,7 +485,7 @@ class Store:
              json.dumps(refs or {}), body, now_iso()),
         )
         if mtype in ACTIONABLE:
-            for rcpt in self._recipients(project, from_agent, to_agent):
+            for rcpt in self._recipients(project, from_agent, to_agent, mtype):
                 self.conn.execute(
                     "INSERT INTO inbox(message_id,recipient,status,deliveries) "
                     "VALUES(?,?,'pending',0)",
@@ -434,10 +506,12 @@ class Store:
                 project, from_agent, to_agent, mtype, body, **kw)
         res = {"message_id": mid, "duplicate": dup}
         if to_agent == "broadcast" and mtype in ACTIONABLE and not dup:
-            if not self._recipients(project, from_agent, "broadcast"):
+            if not self._recipients(project, from_agent, "broadcast", mtype):
+                who = "workers" if mtype == "task" else "reviewers"
                 res["warning"] = (
-                    "no reviewers have joined yet — this broadcast has zero recipients "
-                    "right now. Reviewers who join later are backfilled automatically.")
+                    f"no {who} have joined yet — this broadcast has zero recipients "
+                    f"right now. {who.capitalize()} who join later are backfilled "
+                    "automatically.")
         elif to_agent not in ("broadcast", from_agent) and not dup:
             # Directed message footguns: (1) a log-only type creates no inbox row, so the
             # recipient is never prompted; (2) an actionable message to an agent that is
@@ -536,6 +610,25 @@ class Store:
             drained.append(got["message_id"])
         return {"drained": len(drained), "message_ids": drained}
 
+    def _restore_task_pool(self, project):
+        """Re-open a task to the whole worker pool once it falls back to unclaimed.
+
+        A claimed task preempts its sibling rows (work-stealing). If the winning worker
+        dies and the claim is swept/reclaimed back to pending, those siblings must return
+        to pending too — otherwise only the original (dead) worker could re-claim it and
+        the task would strand. Restore siblings ONLY for a task with no active 'claimed'
+        and no 'done' row (i.e. abandoned, not in-progress and not already submitted).
+        MUST be called inside a write_tx()."""
+        self.conn.execute(
+            "UPDATE inbox SET status='pending', claimed_by=NULL, claim_token=NULL, "
+            "leased_until=NULL WHERE status='preempted' "
+            "AND message_id IN (SELECT message_id FROM messages "
+            "                   WHERE project=? AND type='task') "
+            "AND message_id NOT IN (SELECT message_id FROM inbox "
+            "                       WHERE status IN ('claimed','done'))",
+            (project,),
+        )
+
     def sweep(self, project):
         """Return expired claims to pending. Runs inline before each claim."""
         with self.write_tx():
@@ -547,6 +640,7 @@ class Store:
                 "AND message_id IN (SELECT message_id FROM messages WHERE project=?)",
                 (now_iso(), project),
             )
+            self._restore_task_pool(project)
             return cur.rowcount
 
     def in_flight(self, project, agent=None):
@@ -615,6 +709,9 @@ class Store:
                     f"claim_token=NULL, leased_until=NULL WHERE message_id IN ({ph})",
                     targets,
                 )
+                # a reclaimed task must reopen to the whole worker pool, not just its
+                # (dead) original claimer — restore the preempted sibling rows
+                self._restore_task_pool(project)
         return {"reclaimed": len(targets), "message_ids": targets, "forced": force}
 
     def claim(self, project, agent, lease_min=DEFAULT_LEASE_MIN, wait=0.0,
@@ -656,6 +753,17 @@ class Store:
                 "leased_until=?, deliveries=deliveries+1 "
                 "WHERE message_id=? AND recipient=?",
                 (agent, token, leased_iso, cand["message_id"], agent),
+            )
+            # Work-stealing: a `task` fans out one row per worker, but only ONE worker
+            # should do it. The first claimer preempts the still-pending sibling rows so
+            # no one else picks it up. If this claim is later swept/reclaimed back to
+            # pending (worker died), the siblings are RESTORED (see _restore_task_pool) so
+            # any interchangeable worker can re-steal it — not just the original claimer.
+            self.conn.execute(
+                "UPDATE inbox SET status='preempted', claim_token=NULL, leased_until=NULL "
+                "WHERE message_id=? AND recipient!=? AND status='pending' "
+                "AND message_id IN (SELECT message_id FROM messages WHERE type='task')",
+                (cand["message_id"], agent),
             )
             inb = self.conn.execute(
                 "SELECT deliveries FROM inbox WHERE message_id=? AND recipient=?",
@@ -775,25 +883,97 @@ class Store:
         approved = {r["from_agent"] for r in rows}
         return {a: (a in approved) for a in approvers}
 
+    def _task_rollup(self, project):
+        """Per-task state for an orchestrated plan. A task moves todo -> claimed (a worker
+        holds it) -> submitted (worker posted its result) -> accepted (trusted reviewer(s)
+        approved it, per the project's accept_policy). Only an approver can post an
+        `approval` (see _assert_can_approve). This is the roll-up decide() converges on.
+
+        accept_policy decides what 'accepted' requires:
+          any        -> >=1 approver approved the task's thread
+          all        -> every approver approved it
+          final:<id> -> approver <id> approved it
+        """
+        p = self.get_project(project)
+        policy = (p["accept_policy"] if "accept_policy" in p.keys() else None) or "any"
+        approvers = {r["agent_id"] for r in self.participants(project, role="approver")}
+        tasks = self.conn.execute(
+            "SELECT message_id, thread_id, body, seq FROM messages "
+            "WHERE project=? AND type='task' ORDER BY seq", (project,),
+        ).fetchall()
+        out = []
+        for t in tasks:
+            mid = t["message_id"]
+            doer = self.conn.execute(
+                "SELECT claimed_by, status FROM inbox WHERE message_id=? "
+                "AND status IN ('claimed','done') LIMIT 1", (mid,),
+            ).fetchone()
+            approved_by = sorted(
+                r["from_agent"] for r in self.conn.execute(
+                    "SELECT DISTINCT from_agent FROM messages WHERE project=? "
+                    "AND type='approval' AND thread_id=?", (project, t["thread_id"]),
+                ).fetchall())
+            if policy == "all":
+                accepted = bool(approvers) and approvers.issubset(set(approved_by))
+            elif policy.startswith("final:"):
+                accepted = policy[6:].strip() in approved_by
+            else:  # any
+                accepted = len(approved_by) > 0
+            if accepted:
+                state = "accepted"
+            elif doer and doer["status"] == "done":
+                state = "submitted"
+            elif doer and doer["status"] == "claimed":
+                state = "claimed"
+            else:
+                state = "todo"
+            if not accepted:
+                accepted_by = None
+            elif policy.startswith("final:"):
+                accepted_by = policy[6:].strip()          # the designated final reviewer
+            else:
+                accepted_by = ",".join(approved_by)       # any/all: who signed off
+            title = (t["body"] or "").strip().splitlines()[0][:60] if t["body"] else ""
+            out.append({"task": mid, "seq": t["seq"], "title": title, "state": state,
+                        "worker": doer["claimed_by"] if doer else None,
+                        "approved_by": approved_by, "accepted_by": accepted_by})
+        return out
+
     def decide(self, project, from_agent, body, thread_id=None, parent=None,
                idempotency_key=None, force=False):
-        """Initiator posts the binding decision and converges the project.
+        """Initiator/orchestrator posts the binding decision and converges the project.
 
         Pass --thread/--parent to attach the decision to the thread it closes so
         the log threads cleanly; the project-level state also flips to converged.
 
-        If the project has approver participants, every one of them must have
-        posted an `approval` message first — otherwise decide refuses. `force=True`
-        converges anyway (the returned dict records that the gate was overridden).
+        Convergence gate, overridable with force=True (recorded in output):
+        - Orchestrated plan (has `task`s): every task must be `accepted` per the project's
+          accept_policy (any | all | final:<id>). The policy — not a blanket all-approvers
+          rule — is the authority for who must sign off, so the approver gate is skipped.
+        - Plain review project (no tasks): if it has approver participants, every one must
+          have posted an `approval` first.
         """
+        tasks = self._task_rollup(project)
         approvals = self._approval_status(project)
         missing = sorted(a for a, ok in approvals.items() if not ok)
-        if missing and not force:
-            raise CollabError(
-                "decide blocked: approver(s) have not signed off yet: "
-                f"{', '.join(missing)}. Each approver must post an 'approval' "
-                "message (`post --type approval`, or `complete --type approval` "
-                "when draining their inbox). Pass --force to converge anyway.")
+        if tasks:
+            unaccepted = [t for t in tasks if t["state"] != "accepted"]
+            if unaccepted and not force:
+                policy = self.get_project(project)["accept_policy"] or "any"
+                detail = ", ".join(t["task"][:8] + "=" + t["state"] for t in unaccepted)
+                raise CollabError(
+                    f"decide blocked: {len(unaccepted)} of {len(tasks)} task(s) not yet "
+                    f"accepted under policy '{policy}' ({detail}). A task is accepted when "
+                    "the required approver(s) post an `approval` in its thread. Pass "
+                    "--force to converge anyway.")
+        else:
+            unaccepted = []
+            if missing and not force:
+                raise CollabError(
+                    "decide blocked: approver(s) have not signed off yet: "
+                    f"{', '.join(missing)}. Each approver must post an 'approval' "
+                    "message (`post --type approval`, or `complete --type approval` "
+                    "when draining their inbox). Pass --force to converge anyway.")
         with self.write_tx():
             mid, dup = self._insert_message(
                 project, from_agent, "broadcast", "decision", body,
@@ -817,6 +997,10 @@ class Store:
             out["approvals"] = approvals
             if missing:
                 out["forced_over_missing_approvals"] = missing
+        if tasks:
+            out["tasks_total"] = len(tasks)
+            if unaccepted:
+                out["forced_over_unaccepted_tasks"] = [t["task"] for t in unaccepted]
         return out
 
     def log(self, project, since_seq=0, actionable_only=False, to_agent=None,
@@ -886,6 +1070,10 @@ class Store:
             # review a watcher picked up then abandoned — it is NOT in 'pending', so
             # without this it would be invisible (an empty 'pending' hiding real work).
             "in_flight": self.in_flight(project),
+            # per-task roll-up for orchestrated plans (empty when the project has no tasks)
+            "tasks": self._task_rollup(project),
+            "accept_policy": (p["accept_policy"] if "accept_policy" in p.keys()
+                              else "any") or "any",
             "stalled": [
                 {"recipient": r["recipient"], "message_id": r["message_id"],
                  "type": r["type"], "deliveries": r["deliveries"]} for r in stalled
@@ -940,9 +1128,39 @@ class Store:
                                   "(start/broadcast the next step's review).")
         if out["orphaned_for_you"]:
             ids = ", ".join(m[:8] for m in out["orphaned_for_you"])
-            return result("reclaim", f"{len(out['orphaned_for_you'])} review(s) claimed "
+            return result("reclaim", f"{len(out['orphaned_for_you'])} item(s) claimed "
                           f"for you were abandoned (watcher likely died): {ids}. "
                           f"Run reclaim --agent {agent} --force, then continue.")
+
+        # Workers pull from the shared task queue: pending work == a task to do.
+        if role in WORKER_ROLES:
+            if out["pending_for_you"]:
+                return result("do-task", f"{out['pending_for_you']} task(s) available — "
+                              "claim one and do it (first claim wins; siblings preempt).")
+            return result("wait", "No tasks queued for you right now.")
+
+        # The orchestrator owns the plan: drive tasks to acceptance, then converge.
+        if role == "orchestrator":
+            tasks = self._task_rollup(project)
+            by_state = {}
+            for t in tasks:
+                by_state[t["state"]] = by_state.get(t["state"], 0) + 1
+            out["tasks"] = {"total": len(tasks), "by_state": by_state}
+            if not tasks:
+                return result("broadcast", "No tasks posted yet — post the plan's "
+                              "task(s) to put the workers to work.")
+            orphan_tasks = [f["message_id"] for f in self.in_flight(project)
+                            if f["orphaned"] and f["type"] == "task"]
+            if orphan_tasks:
+                return result("reclaim", f"{len(orphan_tasks)} task(s) abandoned by a "
+                              "dead worker — `reclaim --force` reopens them to the pool.")
+            if not any(t["state"] != "accepted" for t in tasks):
+                return result("decide", f"All {len(tasks)} task(s) accepted by trusted "
+                              "reviewers — `decide` to converge the plan.")
+            summary = ", ".join(f"{n} {s}" for s, n in sorted(by_state.items()))
+            return result("wait", f"Plan in progress ({summary}) — workers and reviewers "
+                          "still finishing. Wait, then re-check.")
+
         if out["pending_for_you"]:
             return result("drain", f"{out['pending_for_you']} message(s) in your inbox — "
                           "claim each, handle it, and complete/decide.")
@@ -1356,6 +1574,10 @@ def build_parser():
     s.add_argument("--goal", default="")
     s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
                    help="agent id; defaults to $COLLAB_AGENT")
+    s.add_argument("--role", default="initiator", choices=ROLES,
+                   help="starter's role — use 'orchestrator' to own a multi-worker plan")
+    s.add_argument("--accept-policy", default="any",
+                   help="task acceptance: any | all | final:<agent-id> (orchestrated plans)")
     s.add_argument("--max-rounds", type=int, default=6)
 
     s = sub.add_parser("join", help="join a project as reviewer")
@@ -1522,6 +1744,12 @@ def build_parser():
     s.add_argument("--project", required=True)
 
     s = sub.add_parser(
+        "policy", help="show or set a plan's task acceptance policy (any|all|final:<id>)")
+    s.add_argument("--project", required=True)
+    s.add_argument("--set", dest="set_policy", default=None,
+                   help="new policy: any | all | final:<agent-id>")
+
+    s = sub.add_parser(
         "next",
         help="one recommended action for a self-paced loop "
              "(reclaim|drain|decide|wait|done|broadcast)")
@@ -1596,7 +1824,8 @@ def main(argv=None):
         cmd = args.cmd
         if cmd == "start":
             _emit(store.start(args.project, args.topic, args.goal, args.agent,
-                              max_rounds=args.max_rounds))
+                              role=args.role, max_rounds=args.max_rounds,
+                              accept_policy=args.accept_policy))
         elif cmd == "join":
             _emit(store.join(args.project, args.agent, args.role))
         elif cmd == "post":
@@ -1697,6 +1926,14 @@ def main(argv=None):
             _emit(store.doctor(args.project, args.agent))
         elif cmd == "sweep":
             _emit({"reset": store.sweep(args.project)})
+        elif cmd == "policy":
+            if args.set_policy is not None:
+                _emit(store.set_accept_policy(args.project, args.set_policy))
+            else:
+                pr = store.get_project(args.project)
+                _emit({"project": args.project,
+                       "accept_policy": (pr["accept_policy"]
+                                         if "accept_policy" in pr.keys() else "any") or "any"})
         elif cmd == "next":
             _emit(store.next_action(args.project, args.agent))
         elif cmd == "reclaim":

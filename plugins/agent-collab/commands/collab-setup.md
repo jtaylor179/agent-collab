@@ -1,12 +1,23 @@
 ---
-description: Interactive wizard — step through reviewers, roles, models, and launch a collab review
+description: Interactive wizard — set up a review OR an orchestrated worker plan (roles, models, acceptance policy)
 ---
 
 The user wants a guided, interactive setup of a collaboration project. Use the
 `agent-collab` skill and follow its **"Interactive setup wizard (bare invocation)"**
 section exactly.
 
-Steps:
+**Round 0 — mode.** First ask which shape the collaboration is (skip only if obvious
+from the request):
+- **Review** (default) — one work product, reviewers critique → follow "Wizard A: review"
+  (the steps below).
+- **Orchestrated plan** — many interchangeable workers pull tasks from a shared queue,
+  trusted reviewers accept, an orchestrator converges → follow the skill's **"Wizard B:
+  orchestrated plan"** instead: pick workers, trusted reviewers (approvers), an acceptance
+  policy (`any|all|final:<id>`), and the task list; then `start --role orchestrator
+  --accept-policy …`, join workers/approvers, `post --type task` per task, launch worker +
+  approver watchers, and hand off to `/collab-orchestrate`.
+
+Review-mode steps:
 
 1. Resolve `COLLAB_BIN` and `COLLAB_ROOT` per the skill (same shared local-disk root,
    default `$HOME/.collab`). You are the initiator (`claude-1`, or `codex-1` in Codex).

@@ -1208,3 +1208,221 @@ class TestNextAction(Base):
         nx = s.next_action("A", "claude-1")
         self.assertEqual(nx["action"], "wait")
         self.assertIn("offline", nx["why"])
+
+
+DEAD = "2000-01-01T00:00:00.000000Z"
+
+
+class TestOrchestratedPlan(Base):
+    """Option B (ADR-0001): an orchestrated plan = one project with a claimable task
+    queue. Interchangeable workers pull tasks (work-stealing); only trusted reviewers
+    (approvers) can accept; the orchestrator converges when every task is accepted."""
+
+    def _plan(self, workers=("w1", "w2"), approvers=("claude-1",)):
+        s = self.s
+        s.start("P", "plan", "ship it", "orch-1", role="orchestrator")
+        for w in workers:
+            s.join("P", w, role="worker")
+        for a in approvers:
+            s.join("P", a, role="approver")
+        return s
+
+    def _post_task(self, s, body="do subtask X"):
+        return s.post("P", "orch-1", "broadcast", "task", body, round_=1)["message_id"]
+
+    # --- fanout -----------------------------------------------------------------
+    def test_task_fans_out_to_workers_not_reviewers(self):
+        s = self._plan()
+        self._post_task(s)
+        self.assertEqual(len(s.poll("P", "w1")), 1)
+        self.assertEqual(len(s.poll("P", "w2")), 1)
+        self.assertEqual(len(s.poll("P", "claude-1")), 0)  # approver gets no tasks
+
+    def test_review_request_still_goes_to_approvers_not_workers(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "review_request", "review this", round_=1)
+        self.assertEqual(len(s.poll("P", "claude-1")), 1)
+        self.assertEqual(len(s.poll("P", "w1")), 0)  # workers get no reviews
+
+    # --- work-stealing ----------------------------------------------------------
+    def test_first_worker_wins_sibling_preempted(self):
+        s = self._plan()
+        self._post_task(s)
+        c = s.claim("P", "w1")
+        self.assertEqual(c["type"], "task")
+        self.assertIsNone(s.claim("P", "w2"))  # w2 can't also do it
+        self.assertEqual(len(s.poll("P", "w2")), 0)
+
+    def test_dead_worker_task_restolen_by_another(self):
+        s = self._plan()
+        self._post_task(s)
+        c1 = s.claim("P", "w1")            # w1 grabs it, then "dies"
+        s.conn.execute("UPDATE inbox SET leased_until=? WHERE claimed_by='w1'", (DEAD,))
+        # sweep returns it to pending AND restores w2's preempted sibling
+        c2 = s.claim("P", "w2")
+        self.assertIsNotNone(c2)
+        self.assertEqual(c2["claim_message_id"], c1["claim_message_id"])
+        self.assertEqual(c2["claimed_by"] if "claimed_by" in c2.keys() else "w2", "w2")
+
+    def test_reclaim_force_reopens_task_to_pool(self):
+        s = self._plan()
+        self._post_task(s)
+        s.claim("P", "w1")
+        s.reclaim("P", force=True)         # orchestrator knows w1 is dead
+        self.assertIsNotNone(s.claim("P", "w2"))  # w2 can now steal it
+
+    # --- trusted-reviewer gate (FR2) --------------------------------------------
+    def test_only_approver_can_accept(self):
+        s = self._plan(approvers=("claude-1",))
+        s.join("P", "rev-1", role="reviewer")  # a plain reviewer, not trusted to accept
+        for who in ("orch-1", "w1", "rev-1"):
+            with self.assertRaises(CollabError):
+                s.post("P", who, "broadcast", "approval", "LGTM")
+        # the trusted reviewer can
+        ok = s.post("P", "claude-1", "broadcast", "approval", "LGTM")
+        self.assertFalse(ok["duplicate"])
+
+    def test_non_participant_cannot_approve(self):
+        s = self._plan()
+        with self.assertRaises(CollabError):
+            s.post("P", "stranger-9", "broadcast", "approval", "LGTM")
+
+    # --- roll-up + convergence --------------------------------------------------
+    def _drive_to_accepted(self, s, body="do X"):
+        tid = self._post_task(s, body)
+        c = s.claim("P", "w1")
+        # worker submits its result as a review_request to the trusted reviewer
+        s.complete("P", "w1", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result: did X", to_agent="broadcast")
+        rc = s.claim("P", "claude-1")
+        s.complete("P", "claude-1", rc["claim_message_id"], rc["claim_token"],
+                   "approval", "accepted")
+        return tid
+
+    def test_rollup_state_transitions(self):
+        s = self._plan()
+        tid = self._post_task(s)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "todo")
+        c = s.claim("P", "w1")
+        self.assertEqual(s._task_rollup("P")[0]["state"], "claimed")
+        s.complete("P", "w1", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")
+        self.assertEqual(s._task_rollup("P")[0]["state"], "submitted")
+        rc = s.claim("P", "claude-1")
+        s.complete("P", "claude-1", rc["claim_message_id"], rc["claim_token"],
+                   "approval", "ok")
+        row = s._task_rollup("P")[0]
+        self.assertEqual(row["state"], "accepted")
+        self.assertEqual(row["accepted_by"], "claude-1")
+
+    def test_decide_blocked_until_all_tasks_accepted(self):
+        s = self._plan()
+        self._post_task(s, "task A")
+        self._drive_to_accepted(s, "task B")   # one accepted, one still todo
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "converge")
+        # force overrides and records what was skipped
+        out = s.decide("P", "orch-1", "converge", force=True)
+        self.assertEqual(out["state"], "converged")
+        self.assertIn("forced_over_unaccepted_tasks", out)
+
+    def test_decide_allowed_when_all_accepted(self):
+        s = self._plan()
+        self._drive_to_accepted(s)
+        out = s.decide("P", "orch-1", "converge")
+        self.assertEqual(out["state"], "converged")
+        self.assertEqual(out["tasks_total"], 1)
+
+    # --- next_action for the new roles ------------------------------------------
+    def test_next_worker_do_task_then_wait(self):
+        s = self._plan()
+        self._post_task(s)
+        self.assertEqual(s.next_action("P", "w1")["action"], "do-task")
+        s.claim("P", "w1")
+        self.assertEqual(s.next_action("P", "w2")["action"], "wait")  # sibling preempted
+
+    def test_next_orchestrator_lifecycle(self):
+        s = self._plan()
+        self.assertEqual(s.next_action("P", "orch-1")["action"], "broadcast")
+        self._post_task(s)
+        self.assertEqual(s.next_action("P", "orch-1")["action"], "wait")  # in progress
+        self._drive_to_accepted(s, "another") if False else None
+        # accept the one task
+        c = s.claim("P", "w1")
+        s.complete("P", "w1", c["claim_message_id"], c["claim_token"],
+                   "review_request", "r", to_agent="broadcast")
+        rc = s.claim("P", "claude-1")
+        s.complete("P", "claude-1", rc["claim_message_id"], rc["claim_token"],
+                   "approval", "ok")
+        self.assertEqual(s.next_action("P", "orch-1")["action"], "decide")
+        s.decide("P", "orch-1", "go")
+        self.assertEqual(s.next_action("P", "orch-1")["action"], "done")
+
+
+class TestAcceptPolicy(Base):
+    """Configurable per-plan acceptance: who counts as the final reviewer —
+    any (default) | all | final:<id>. Governs when a task is accepted and thus when
+    the orchestrator can converge the plan."""
+
+    def _plan(self, policy="any", approvers=("a1", "a2")):
+        s = self.s
+        s.start("P", "t", "g", "orch-1", role="orchestrator", accept_policy=policy)
+        s.join("P", "w1", role="worker")
+        for a in approvers:
+            s.join("P", a, role="approver")
+        return s
+
+    def _task(self, s):
+        return s.post("P", "orch-1", "broadcast", "task", "do X", round_=1)["message_id"]
+
+    def _approve(self, s, approver, task_id):
+        s.post("P", approver, "broadcast", "approval", "ok", thread_id=task_id)
+
+    def test_default_policy_is_any(self):
+        s = self.s
+        s.start("P", "t", "g", "orch-1", role="orchestrator")
+        self.assertEqual(s.status("P")["accept_policy"], "any")
+
+    def test_any_one_approver_accepts(self):
+        s = self._plan("any")
+        t = self._task(s)
+        self._approve(s, "a1", t)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+        self.assertEqual(s.decide("P", "orch-1", "go")["state"], "converged")
+
+    def test_all_requires_every_approver(self):
+        s = self._plan("all")
+        t = self._task(s)
+        self._approve(s, "a1", t)
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")  # a2 missing
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")
+        self._approve(s, "a2", t)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+        self.assertEqual(s.decide("P", "orch-1", "go")["state"], "converged")
+
+    def test_final_requires_designated_reviewer(self):
+        s = self._plan("final:a2")
+        t = self._task(s)
+        self._approve(s, "a1", t)  # a non-final approver's OK is non-binding
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")
+        self._approve(s, "a2", t)  # the designated final reviewer
+        row = s._task_rollup("P")[0]
+        self.assertEqual(row["state"], "accepted")
+        self.assertEqual(row["accepted_by"], "a2")
+        self.assertEqual(s.decide("P", "orch-1", "go")["state"], "converged")
+
+    def test_set_and_get_policy(self):
+        s = self._plan("any")
+        self.assertEqual(s.set_accept_policy("P", "final:a1")["accept_policy"], "final:a1")
+        self.assertEqual(s.status("P")["accept_policy"], "final:a1")
+
+    def test_invalid_policy_rejected(self):
+        s = self.s
+        with self.assertRaises(CollabError):
+            s.start("P", "t", "g", "o", role="orchestrator", accept_policy="bogus")
+        s.start("Q", "t", "g", "o", role="orchestrator")
+        with self.assertRaises(CollabError):
+            s.set_accept_policy("Q", "final:")  # empty id

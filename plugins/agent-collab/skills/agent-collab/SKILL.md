@@ -97,7 +97,12 @@ log      --project X [--since N] [--follow]
 delete   --project X --yes
 watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
 reclaim  --project X [--agent <id>] [--message <id>] [--force]         # recover a dead watcher's stranded claim
+policy   --project X [--set any|all|final:<agent-id>]                  # show/set task acceptance policy
 ```
+
+Orchestrated-plan verbs: `start --role orchestrator [--accept-policy any|all|final:<id>]`,
+`join --role worker|approver`, `post --type task --to broadcast`, `policy`, `next` (worker/
+orchestrator), `status.tasks`/`status.accept_policy`. See "Orchestrated multi-worker plans" below.
 
 **When a watcher dies mid-review** (agent goes offline, process/machine killed) the
 claimed inbox row is stuck in `claimed` and is INVISIBLE to `poll`/`inbox` (those show
@@ -119,9 +124,36 @@ on reviewer(s); names who and if they're offline), `done` (converged — advance
 next step), or `broadcast` (initiator, nothing sent yet). The `/collab-loop` command runs
 exactly this tick loop under `/loop`.
 
-Message `--type`: `review_request question response rebuttal proposal approval decision status heartbeat`
-(only the first five create inbox work; approval/decision/status/heartbeat are log-only —
-an `approval` records an approver's sign-off and is what unblocks `decide`).
+**Orchestrated multi-worker plans (interchangeable workers + trusted reviewers).** For a
+plan where MANY interchangeable workers each do a piece and only specific agents are
+trusted to accept the work, use the task-queue model (ADR-0001):
+
+- **Roles:** the plan owner joins/starts as `orchestrator` (`start --role orchestrator`);
+  the interchangeable code-doers join as `worker`; the trusted reviewers join as
+  `approver` (only an approver may accept — see below). A plain `reviewer` can give
+  feedback but not accept.
+- **`task` type:** `post --type task --to broadcast` posts a unit of work to DO. It fans
+  out to the **worker pool** (not reviewers) and is **work-stealing**: the first worker
+  to `claim` it wins, the rest are preempted. If that worker dies, `sweep`/`reclaim`
+  reopens it to the whole pool — any interchangeable worker re-steals it.
+- **Trusted-reviewer gate (enforced):** only an `approver` may post an `approval`; a
+  worker/orchestrator/plain-reviewer/non-participant is rejected by the bus. So a worker
+  can never certify its own code. WHO is trusted is configurable — you pick who joins as
+  `approver` (not hardcoded to any agent).
+- **Acceptance policy (who's the final say):** `start --accept-policy` (or `policy --set`)
+  chooses when a task is `accepted`: `any` (default — any one approver accepts), `all`
+  (every approver must approve it), or `final:<agent-id>` (only that designated reviewer's
+  approval accepts). Other approvers' input is then non-binding feedback.
+- **Convergence:** `status.tasks` rolls each task up as `todo → claimed → submitted →
+  accepted` (per the policy); `status.accept_policy` shows the rule. `decide` is blocked
+  until every task is accepted (override with `--force`). `next` for a `worker` returns
+  `do-task`; for the `orchestrator` it returns `broadcast`/`wait`/`reclaim`/`decide`/`done`
+  off the task roll-up. `/collab-orchestrate` runs the orchestrator tick loop.
+
+Message `--type`: `review_request question task response rebuttal proposal approval decision status heartbeat`
+(the first six create inbox work; approval/decision/status/heartbeat are log-only — an
+`approval` records a trusted reviewer's sign-off and is what unblocks `decide`/accepts a
+`task`). Broadcast fan-out is BY TYPE: `task` → workers, review types → reviewers/approvers.
 
 ## Orient before acting (auto role detection)
 
@@ -152,12 +184,23 @@ so and offer to start a new project (which needs a work product).
 When the user invokes the skill **bare** — no project name, no file, no reviewers
 (e.g. just "agent-collab", "start a collab", "set up a collab session") — do not ask
 one open-ended question and do not guess. Step them through setup as a short wizard,
-then run the initiator flow with their answers.
+then run the flow with their answers.
 
-Ask in **two grouped rounds**, not a serial interrogation. In Claude Code, use the
-`AskUserQuestion` tool (one call per round, up to 4 questions; `multiSelect` for the
-reviewer question). In harnesses without such a tool, ask the same rounds as two
-compact chat messages.
+Ask in grouped rounds, not a serial interrogation. In Claude Code, use the
+`AskUserQuestion` tool (one call per round, up to 4 questions; `multiSelect` where
+noted). In harnesses without such a tool, ask the same rounds as compact chat messages.
+
+**Round 0 — collaboration mode.** Ask which shape the collaboration is (skip only if the
+request already makes it obvious):
+
+- **Review** (default) — ONE work product; reviewers critique it and the initiator
+  converges. This is the review wizard below.
+- **Orchestrated plan** — MANY interchangeable workers each do a piece of work pulled
+  from a shared task queue; trusted reviewers accept; an orchestrator converges when all
+  tasks are accepted. If chosen, follow **"Wizard B: orchestrated plan"** instead of
+  Rounds 1–2.
+
+## Wizard A: review (default)
 
 **Round 1 — the project:**
 
@@ -222,6 +265,44 @@ chosen mode:
 Finish with the standard offer: wait for responses now (`claim --wait 600`) or come
 back later with "check collab project X". Do not re-run the wizard when the user
 names a project, file, or reviewer in their request — answer only what's missing.
+
+## Wizard B: orchestrated plan
+
+For the "many interchangeable workers + trusted reviewers" mode (see "Orchestrated
+multi-worker plans" above for the mechanics). You are the **orchestrator**.
+
+**Round 1 — the plan** (one `AskUserQuestion` round):
+
+1. **Workers** (multi-select) — the interchangeable code-doers that pull tasks:
+   `codex-1`, `copilot-1`, `cursor-1`, `antigravity-1` (and/or `claude-1`). Any agent can
+   be a worker; they need not be trusted reviewers.
+2. **Trusted reviewers** (multi-select) — who may **accept** work; each joins as
+   `approver`. Only these can post an `approval`; a worker can never accept its own code.
+3. **Acceptance policy** — whose sign-off is the final say: `any` (default — any one
+   trusted reviewer accepts a task), `all` (every trusted reviewer must approve it), or
+   `final:<agent-id>` (one designated final reviewer). Maps to `--accept-policy`.
+4. **Onboarding mode** — same three choices as review mode (hands-off watchers you
+   launch / print the commands / interactive).
+
+**Round 2 — the tasks.** Get the task list: either free-text (one line per task) or a
+path to a plan file you split into tasks. Derive the project name (e.g.
+`widget-plan-0718`) and state it. (Per-agent model/access knobs are the same table as
+review mode; ask only if the user wants non-defaults.)
+
+**Then execute:**
+
+1. `start --project <name> --role orchestrator --accept-policy <any|all|final:<id>>`.
+2. `join --agent <id> --role worker` for each worker; `join --agent <id> --role approver`
+   for each trusted reviewer. (Register roles BEFORE launching watchers — the watcher's
+   auto-join preserves an existing role.)
+3. `post --type task --to broadcast --body "<task>"` once per task. Tasks fan out to the
+   worker pool and are work-stealing (first claim wins).
+4. Onboard per the chosen mode: launch a watcher for each **worker** (they pull tasks) and
+   each **approver** (they review/accept) — mode (a) background, (b) print commands, or
+   (c) interactive. An approver's `APPROVED`-first output posts as an `approval`.
+5. Hand off to the orchestrator loop: run `/collab-orchestrate <name>` (or drive it
+   manually with `next --agent <name>` → `broadcast|wait|reclaim|decide|done`). Offer to
+   start it now or let the user come back later.
 
 ## Intent → action
 
