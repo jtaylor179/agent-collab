@@ -16,16 +16,18 @@ Setup:
    [--accept-policy any|all|final:<id>]`) if it's new. Register participants with DISTINCT
    ids and the right roles:
    - interchangeable code-doers → `join --agent <id> --role worker`
-   - trusted reviewers (only these can accept) → `join --agent <id> --role approver`
-   WHO is trusted is your choice — put whichever agents the user trusts to review as
-   `approver` (e.g. claude-1, codex-1, copilot-1). The **acceptance policy** decides whose
-   sign-off is the final say: `any` (any one approver, default), `all` (every approver), or
-   `final:<id>` (one designated reviewer). Set it at start or later with
-   `policy --project X --set <policy>`. Confirm the policy with the user if unstated.
+   - trusted reviewers (only these can accept) → **`grant --by <you> --agent <id> --role
+     approver`** (an authority role can't be self-assigned — you, the orchestrator, grant
+     it). WHO is trusted is your choice (e.g. claude-1, codex-1, copilot-1).
+   The **acceptance policy** decides whose sign-off is the final say: `any` (any one
+   approver, default), `all` (every approver), or `final:<id>` (one designated reviewer;
+   must be an approver). Set it at start or later with `policy --project X --set <policy>`.
+   Confirm the policy with the user if unstated.
 3. Post the plan's tasks: for each unit of work, `post --type task --to broadcast --body
    "<task spec>"`. Tasks fan out to the worker pool and are work-stealing (first claim
-   wins). Launch each worker's watcher (`collab-watch <agent> <project>`) so any worker
-   can pull from the queue hands-off.
+   wins). Launch each worker's watcher **with `COLLAB_WATCH_DETACH=1`** (so it survives
+   your shell — otherwise it dies each turn and strands its claim) so any worker pulls
+   hands-off.
 
 Each tick — run `next --project X --agent <me>` and branch on `action`:
 
@@ -40,9 +42,19 @@ Each tick — run `next --project X --agent <me>` and branch on `action`:
 - **`done`** — converged. If this plan is one step of a larger program, advance to the
   next; otherwise stop.
 
-The trust boundary is bus-enforced: a worker cannot post an `approval`, so it can never
-accept its own code — you never have to police that yourself. `status.tasks` is the
-source of truth for the roll-up (`todo → claimed → submitted → accepted`).
+**Wiring the review to the task (so acceptance actually flips):** a task is `accepted`
+only when a worker has SUBMITTED it (a `done` inbox row) AND a trusted reviewer approves
+**in that task's thread**. So the worker must claim the task and submit its result with
+`complete --type review_request` (which keeps the task thread) — NOT a fresh review_request
+in a new thread. If review happens in a separate thread, the task stays `todo`/`submitted`
+forever and the plan can't converge. The approver then approves in the same thread.
+
+The trusted-reviewer gate is role-checked: the bus rejects an `approval` posted under any
+non-approver identity, so a correctly-identified worker can't accept its own code by
+accident — you don't have to police that yourself. (Identity is trusted by convention: the
+bus is a local single-user tool and doesn't authenticate which process owns an id, so this
+guards against accidental self-elevation, not a forged identity — see SKILL "Scope".)
+`status.tasks` is the source of truth for the roll-up (`todo → claimed → submitted → accepted`).
 
 Pacing: run under `/loop` (self-paced). **Stop and surface to the user** — don't loop
 silently — when a task keeps failing (`stalled`), a worker pool empties with work

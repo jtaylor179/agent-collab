@@ -17,6 +17,15 @@ Data layout (workspace-local):
   <root>/collab.db          all projects (namespaced by the `project` column)
   <root>/blobs/<sha256>     immutable content store
   default <root> = ./.collab  (override with --root or COLLAB_ROOT)
+
+SECURITY SCOPE (see ADR-0001 "Threat model"): this is a LOCAL, single-user tool. Agent
+identity (COLLAB_AGENT / --from / --by) is trusted BY CONVENTION — the bus has no
+authentication. The role/authority checks (approver-only accept; grant-only approver/
+orchestrator; owner-only decide/policy) prevent ACCIDENTAL or buggy self-elevation among
+cooperating agents you launch; they do NOT defend against a malicious local process that
+forges another agent's id (such a process, with write access to the bus, is already inside
+the trust boundary). Defending against adversarial participants would need per-agent
+authenticated tokens — out of scope for the cooperative model.
 """
 from __future__ import annotations
 
@@ -42,6 +51,11 @@ FANOUT_ROLES = ("reviewer", "approver")
 # that pulls from a plan's shared queue). An orchestrator owns the plan: it posts tasks
 # and is the sole caller of the plan's convergence decide(); it is not itself a worker.
 WORKER_ROLES = ("worker",)
+# Roles that confer AUTHORITY and so must be granted by the project owner, never
+# self-assigned via join(): an approver can accept work (the trust boundary), an
+# orchestrator is the sole decider. worker/reviewer/observer are self-joinable.
+PRIVILEGED_ROLES = ("approver", "orchestrator")
+GRANTOR_ROLES = ("initiator", "orchestrator")
 MSG_TYPES = (
     "question", "review_request", "task", "response", "rebuttal",
     "proposal", "approval", "decision", "status", "heartbeat",
@@ -51,6 +65,9 @@ MSG_TYPES = (
 # the log (an approval records sign-off; it demands no work from anyone else).
 # `task` is a unit of work to DO (claimed by a worker); the review types are work to REVIEW.
 ACTIONABLE = ("question", "review_request", "task", "response", "rebuttal", "proposal")
+# A worker completing a TASK must post a genuine RESULT (content that can be reviewed),
+# not a log-only/empty message — otherwise a task could be marked 'submitted' with no work.
+RESULT_TYPES = ("review_request", "response", "proposal", "rebuttal")
 
 # Acceptance policy for an orchestrated plan — when is a `task` "accepted"?
 #   any        -> any one trusted reviewer (approver) approving accepts it (default)
@@ -191,11 +208,36 @@ class Store:
     def _migrate(self):
         """Idempotent, additive schema migrations for DBs created before a column
         existed (CREATE TABLE IF NOT EXISTS won't add columns to an existing table).
-        Safe to run on every open."""
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(projects)")}
-        if "accept_policy" not in cols:
-            self.conn.execute(
-                "ALTER TABLE projects ADD COLUMN accept_policy TEXT DEFAULT 'any'")
+
+        Concurrency-safe: the check-then-ALTER runs under BEGIN IMMEDIATE so two
+        processes opening the Store at once can't both observe the missing column and
+        race the ALTER — the second waits for the first's commit, re-checks inside its
+        own transaction, and sees the column already there. The duplicate-column error is
+        still tolerated as a belt-and-suspenders backstop."""
+        try:
+            with self.write_tx():
+                cols = {r["name"]
+                        for r in self.conn.execute("PRAGMA table_info(projects)")}
+                if "accept_policy" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE projects ADD COLUMN accept_policy TEXT DEFAULT 'any'")
+                # done_seq records the project seq at which a claimed row was completed, so
+                # task acceptance can require the approval to come AFTER the submission
+                # (not a pre-approval / rubber-stamp of the spec).
+                icols = {r["name"]
+                         for r in self.conn.execute("PRAGMA table_info(inbox)")}
+                if "done_seq" not in icols:
+                    self.conn.execute("ALTER TABLE inbox ADD COLUMN done_seq INTEGER")
+                    # Backfill rows that were already 'done' before this column existed:
+                    # done_seq=0 means "submitted, ordering unknown" so they keep counting
+                    # as submitted (any approval qualifies) instead of regressing to 'todo'.
+                    # New completions get a real boundary. (No orchestrated task rows are
+                    # 'done' in practice, so this only preserves legacy review rows.)
+                    self.conn.execute(
+                        "UPDATE inbox SET done_seq=0 WHERE status='done' AND done_seq IS NULL")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     def close(self):
         with contextlib.suppress(Exception):
@@ -244,16 +286,67 @@ class Store:
         return {"project": project, "state": "gathering", "initiator": agent,
                 "accept_policy": accept_policy}
 
-    def set_accept_policy(self, project, policy):
+    def _submitters(self, project):
+        """Agents who have SUBMITTED a task (the done task rows' claimed_by) — they can
+        never approve their own task, so they can't serve as its trusted reviewer."""
+        return {r["claimed_by"] for r in self.conn.execute(
+            "SELECT DISTINCT claimed_by FROM inbox WHERE status='done' "
+            "AND claimed_by IS NOT NULL AND message_id IN "
+            "(SELECT message_id FROM messages WHERE project=? AND type='task')",
+            (project,)).fetchall()}
+
+    def _validate_final_reviewer(self, project, policy):
+        """A `final:<id>` policy must name a current approver (or an id not yet joined, to
+        be granted approver) who is NOT a task submitter. A worker/reviewer/observer as the
+        final reviewer, or a submitter (whose own approval is excluded), is an
+        impossible-to-satisfy config — the task could never converge — so reject early."""
+        if policy.startswith("final:"):
+            who = policy[6:].strip()
+            r = self._role_of(project, who)
+            if r is not None and r != "approver":
+                raise CollabError(
+                    f"accept-policy 'final:{who}' names '{who}', whose role is '{r}', not "
+                    "approver. A final reviewer must be an approver — grant it the approver "
+                    "role first, or choose a different final reviewer.")
+            if who in self._submitters(project):
+                raise CollabError(
+                    f"accept-policy 'final:{who}' names a task submitter — a reviewer can't "
+                    "approve its own submission, so that task could never converge. Choose "
+                    "a different final reviewer.")
+
+    def _assert_final_reviewer_stays_approver(self, project, agent, new_role):
+        """Continuous invariant: the agent named by a `final:<id>` policy must remain an
+        approver. Blocks join()/grant_role() from registering that agent as anything else
+        (a demotion or a late non-approver self-join would leave an unsatisfiable policy —
+        the task could never be accepted). MUST run inside the caller's write_tx."""
+        p = self.get_project(project)
+        pol = (p["accept_policy"] if "accept_policy" in p.keys() else "") or ""
+        if pol.startswith("final:") and pol[6:].strip() == agent and new_role != "approver":
+            raise CollabError(
+                f"'{agent}' is the plan's designated final reviewer (accept-policy "
+                f"'{pol}') and must stay an approver — cannot set it to '{new_role}'. "
+                "Change the accept-policy first, then reassign the role.")
+
+    def set_accept_policy(self, project, actor, policy):
         """Change who the trusted-reviewer acceptance requires: any | all | final:<id>.
-        Governs when a task is `accepted` and thus when the plan can converge."""
-        self.get_project(project)
+        Governs when a task is `accepted` and thus when the plan can converge.
+
+        Authenticated: only the initiator/orchestrator may change it — otherwise a worker
+        could downgrade `all`/`final:<id>` to `any` and self-satisfy the weaker gate,
+        defeating the trust boundary. The role check runs in the same write transaction as
+        the update so a concurrent demotion can't slip a change through."""
         policy = _valid_policy(policy)
         with self.write_tx():
+            ar = self._role_of(project, actor)
+            if ar not in GRANTOR_ROLES:
+                raise CollabError(
+                    f"only the initiator/orchestrator may change the accept-policy of "
+                    f"'{project}'; '{actor}' is '{ar or 'not a participant'}'.")
+            self._validate_final_reviewer(project, policy)
             self.conn.execute(
                 "UPDATE projects SET accept_policy=?, updated_at=? WHERE name=?",
                 (policy, now_iso(), project))
-        return {"project": project, "accept_policy": policy}
+        return {"project": project, "accept_policy": policy, "set_by": actor}
 
     def join(self, project, agent, role="reviewer"):
         """Register a participant. A reviewer joining AFTER a broadcast still needs
@@ -261,59 +354,161 @@ class Store:
         (actionable, not from them, in a thread not yet closed by a decision).
         Without this, a `start -> broadcast -> join` flow silently drops the review.
         """
-        p = self.get_project(project)
+        self.get_project(project)   # early existence check (fail fast on a bad name)
         ts = now_iso()
-        backfilled = 0
-        existing = self.conn.execute(
-            "SELECT role FROM participants WHERE project=? AND agent_id=?",
-            (project, agent),
-        ).fetchone()
-        # HARD STOP on the #1 setup mistake: a reviewer "joining" under the id that is
-        # already the project's initiator means two different tools share one agent id
-        # (e.g. both defaulted to claude-1). Nothing would route — refuse loudly instead
-        # of registering a self-collision that looks fine until wait/claim is always empty.
-        if existing and existing["role"] == "initiator" and role in FANOUT_ROLES:
-            raise CollabError(
-                f"'{agent}' is already the INITIATOR of '{project}', so it cannot also "
-                f"join as a {role}. This almost always means two tools are using the "
-                f"SAME agent id ('{agent}'). Give the reviewer a DISTINCT id: set "
-                "COLLAB_AGENT (claude-1 for Claude, codex-1 for Codex, copilot-1 for "
-                "Copilot, cursor-1 for Cursor, antigravity-1 for Antigravity) in the reviewer's environment, then join again. If you ARE the "
-                "initiator, you don't need to join — just check the project.")
-        effective_role = existing["role"] if existing else role
+        # Everything that depends on current participant/project state — the existing-role
+        # read, the collision/self-assign guards, effective_role, and the backfill state —
+        # runs INSIDE the write tx (BEGIN IMMEDIATE) so a concurrent role change or
+        # convergence can't make the decision stale.
         with self.write_tx():
+            existing = self.conn.execute(
+                "SELECT role FROM participants WHERE project=? AND agent_id=?",
+                (project, agent),
+            ).fetchone()
+            # HARD STOP on the #1 setup mistake: a reviewer "joining" under the id that is
+            # already the project's initiator means two tools share one agent id (e.g. both
+            # defaulted to claude-1). Nothing would route — refuse loudly.
+            if existing and existing["role"] == "initiator" and role in FANOUT_ROLES:
+                raise CollabError(
+                    f"'{agent}' is already the INITIATOR of '{project}', so it cannot also "
+                    f"join as a {role}. This almost always means two tools are using the "
+                    f"SAME agent id ('{agent}'). Give the reviewer a DISTINCT id: set "
+                    "COLLAB_AGENT (claude-1 for Claude, codex-1 for Codex, copilot-1 for "
+                    "Copilot, cursor-1 for Cursor, antigravity-1 for Antigravity) in the reviewer's environment, then join again. If you ARE the "
+                    "initiator, you don't need to join — just check the project.")
+            # An authority role can't be SELF-assigned: a worker mustn't make itself an
+            # approver. A re-join that keeps an already-granted privileged role is fine.
+            if role in PRIVILEGED_ROLES and not (existing and existing["role"] == role):
+                raise CollabError(
+                    f"'{role}' is an authority role and cannot be self-assigned via join. "
+                    f"The project's initiator/orchestrator must grant it: "
+                    f"`grant --project {project} --by <orchestrator> --agent {agent} "
+                    f"--role {role}`.")
+            effective_role = existing["role"] if existing else role
+            self._assert_final_reviewer_stays_approver(project, agent, effective_role)
+            state = self.get_project(project)["state"]
             self.conn.execute(
                 "INSERT INTO participants(project,agent_id,role,last_heartbeat) "
                 "VALUES(?,?,?,?) ON CONFLICT(project,agent_id) DO UPDATE SET "
                 "last_heartbeat=excluded.last_heartbeat",
                 (project, agent, effective_role, ts),
             )
-            # Backfill the open broadcasts this role is entitled to: workers get `task`s,
-            # reviewers/approvers get the review types. Fanout is by type (see
-            # _recipients), so backfill must mirror it or a late joiner misses its work.
-            backfill_types = (("task",) if effective_role in WORKER_ROLES
-                              else tuple(t for t in ACTIONABLE if t != "task")
-                              if effective_role in FANOUT_ROLES else ())
-            if backfill_types and p["state"] != "converged":
-                ph = ",".join("?" * len(backfill_types))
-                rows = self.conn.execute(
-                    f"SELECT m.message_id FROM messages m WHERE m.project=? "
-                    f"AND m.to_agent='broadcast' AND m.type IN ({ph}) "
-                    f"AND m.from_agent != ? "
-                    f"AND m.thread_id NOT IN ("
-                    f"  SELECT thread_id FROM messages WHERE project=? AND type='decision') "
-                    f"AND NOT EXISTS (SELECT 1 FROM inbox i "
-                    f"  WHERE i.message_id=m.message_id AND i.recipient=?)",
-                    (project, *backfill_types, agent, project, agent),
-                ).fetchall()
-                for r in rows:
-                    self.conn.execute(
-                        "INSERT INTO inbox(message_id,recipient,status,deliveries) "
-                        "VALUES(?,?,'pending',0)",
-                        (r["message_id"], agent),
-                    )
-                    backfilled += 1
+            backfilled = self._backfill_open(project, agent, effective_role, state)
         return {"project": project, "agent": agent, "role": effective_role,
+                "backfilled": backfilled}
+
+    def _backfill_open(self, project, agent, role, state):
+        """Backfill the open broadcasts `role` is entitled to (workers get `task`s,
+        reviewers/approvers get the review types), mirroring _recipients' by-type fan-out.
+        A late-joining worker's task row is inserted 'preempted' when a sibling is already
+        claimed/done (work-stealing exclusivity), else 'pending'. MUST run in write_tx().
+        Returns the count of rows made claimable ('pending')."""
+        backfill_types = (("task",) if role in WORKER_ROLES
+                          else tuple(t for t in ACTIONABLE if t != "task")
+                          if role in FANOUT_ROLES else ())
+        if not backfill_types or state == "converged":
+            return 0
+        ph = ",".join("?" * len(backfill_types))
+        rows = self.conn.execute(
+            f"SELECT m.message_id FROM messages m WHERE m.project=? "
+            f"AND m.to_agent='broadcast' AND m.type IN ({ph}) AND m.from_agent != ? "
+            f"AND m.thread_id NOT IN ("
+            f"  SELECT thread_id FROM messages WHERE project=? AND type='decision') "
+            f"AND NOT EXISTS (SELECT 1 FROM inbox i "
+            f"  WHERE i.message_id=m.message_id AND i.recipient=?)",
+            (project, *backfill_types, agent, project, agent),
+        ).fetchall()
+        worker_backfill = role in WORKER_ROLES
+        backfilled = 0
+        for r in rows:
+            mid = r["message_id"]
+            status = "pending"
+            if worker_backfill and self.conn.execute(
+                "SELECT 1 FROM inbox WHERE message_id=? AND status IN ('claimed','done') "
+                "LIMIT 1", (mid,),
+            ).fetchone():
+                status = "preempted"
+            self.conn.execute(
+                "INSERT INTO inbox(message_id,recipient,status,deliveries) "
+                "VALUES(?,?,?,0)", (mid, agent, status),
+            )
+            if status == "pending":
+                backfilled += 1
+        return backfilled
+
+    def _reconcile_inbox_for_role(self, project, agent, new_role):
+        """When an agent's role changes, its inbox must match the NEW role's entitlements —
+        otherwise a promoted/demoted agent keeps work for a role it no longer holds. The
+        dangerous case: a worker promoted to approver keeps its `task` rows and could
+        claim+complete a task, then approve that same task as a now-current approver,
+        breaking producer/reviewer separation (no identity forgery needed). Delete the
+        agent's UNCLAIMED rows that the new role isn't entitled to; REJECT the change if it
+        holds a CLAIM on an incompatible item (it must complete or release it first).
+        MUST run in the caller's write_tx, before the role update + backfill."""
+        entitled = (("task",) if new_role in WORKER_ROLES
+                    else tuple(t for t in ACTIONABLE if t != "task")
+                    if new_role in FANOUT_ROLES else ())
+        rows = self.conn.execute(
+            "SELECT i.message_id, i.status, m.type FROM inbox i JOIN messages m "
+            "USING(message_id) WHERE i.recipient=? AND m.project=?", (agent, project),
+        ).fetchall()
+        for r in rows:
+            if r["type"] in entitled:
+                continue
+            if r["status"] == "claimed":
+                raise CollabError(
+                    f"can't change '{agent}' to '{new_role}' while it holds a claim on a "
+                    f"'{r['type']}' that role can't handle — `complete` or `release` it "
+                    "first, then change the role.")
+            if r["status"] in ("pending", "preempted"):
+                self.conn.execute(
+                    "DELETE FROM inbox WHERE message_id=? AND recipient=?",
+                    (r["message_id"], agent))
+
+    def grant_role(self, project, granter, agent, role):
+        """The project owner assigns a role to a participant — the ONLY way to confer an
+        authority role (approver/orchestrator). `granter` must itself be the initiator or
+        an orchestrator; this is the enforcement behind the trusted-reviewer gate (a
+        worker can't grant itself approver). Backfills the newly-entitled queue."""
+        self.get_project(project)
+        if role not in ROLES:
+            raise CollabError(f"unknown role: {role}")
+        if role == "initiator":
+            raise CollabError("the initiator is set at start and cannot be granted.")
+        ts = now_iso()
+        with self.write_tx():
+            # Authorize INSIDE the write tx (BEGIN IMMEDIATE) so the granter can't be
+            # concurrently demoted between the check and the grant (TOCTOU). The state read
+            # for backfill is in the same tx too, so we never act on stale convergence.
+            gr = self._role_of(project, granter)
+            if gr not in GRANTOR_ROLES:
+                raise CollabError(
+                    f"only the initiator/orchestrator may grant roles; '{granter}' is "
+                    f"'{gr or 'not a participant'}'.")
+            self._assert_final_reviewer_stays_approver(project, agent, role)
+            # Don't promote a task submitter into being the designated final reviewer:
+            # its own approval is excluded, so `final:<it>` could never converge.
+            pol = self.get_project(project)["accept_policy"] or "any"
+            if (pol.startswith("final:") and pol[6:].strip() == agent
+                    and agent in self._submitters(project)):
+                raise CollabError(
+                    f"can't make '{agent}' an approver: it's the designated final reviewer "
+                    f"(policy '{pol}') AND has submitted a task, which would make that task "
+                    "unconvergeable. Change the accept-policy first.")
+            state = self.get_project(project)["state"]
+            # Reconcile the agent's existing inbox to the NEW role BEFORE switching it:
+            # drop unclaimed rows the new role isn't entitled to, and refuse if it holds an
+            # incompatible claim. Prevents a promoted worker from keeping (and acting on) its
+            # old task rows.
+            self._reconcile_inbox_for_role(project, agent, role)
+            self.conn.execute(
+                "INSERT INTO participants(project,agent_id,role,last_heartbeat) "
+                "VALUES(?,?,?,?) ON CONFLICT(project,agent_id) DO UPDATE SET "
+                "role=excluded.role, last_heartbeat=excluded.last_heartbeat",
+                (project, agent, role, ts),
+            )
+            backfilled = self._backfill_open(project, agent, role, state)
+        return {"project": project, "agent": agent, "role": role, "granted_by": granter,
                 "backfilled": backfilled}
 
     def participants(self, project, role=None):
@@ -420,9 +615,12 @@ class Store:
 
     def _assert_can_approve(self, project, from_agent):
         """The trusted-reviewer gate (FR2): only an `approver` may accept work by posting
-        an `approval`. A worker, orchestrator, plain reviewer, or non-participant cannot —
-        so an agent can never certify its own (or anyone's) task. Enforced in the bus, not
-        by orchestrator convention, because 'who is trusted to accept' is a trust boundary."""
+        an `approval`. A worker, orchestrator, plain reviewer, or non-participant is
+        rejected — so an approval posted under a non-approver identity can't accept a task.
+        This is a role check in the bus (not left to orchestrator convention). Identity
+        itself is trusted by convention — the bus does not authenticate which process owns
+        an id (see the module 'SECURITY SCOPE'), so this guards against accidental
+        self-elevation among cooperating agents, not a maliciously forged identity."""
         r = self._role_of(project, from_agent)
         if r != "approver":
             raise CollabError(
@@ -714,6 +912,24 @@ class Store:
                 self._restore_task_pool(project)
         return {"reclaimed": len(targets), "message_ids": targets, "forced": force}
 
+    def release(self, project, agent, message_id, claim_token):
+        """A worker/reviewer voluntarily hands its OWN claim back to the queue
+        (token-fenced), for PROMPT recovery when its handler fails to start or errors —
+        instead of stranding the claim until the lease expires. Restores the task pool so
+        any interchangeable worker can immediately re-steal it. (Abrupt process death
+        can't call this — that still relies on lease expiry + sweep — but a watcher whose
+        agent subprocess fails should nack rather than sit on the claim.)"""
+        self.get_project(project)
+        with self.write_tx():
+            self._verify_lease(message_id, agent, claim_token)  # must currently hold it
+            self.conn.execute(
+                "UPDATE inbox SET status='pending', claimed_by=NULL, claim_token=NULL, "
+                "leased_until=NULL WHERE message_id=? AND recipient=?",
+                (message_id, agent),
+            )
+            self._restore_task_pool(project)
+        return {"released": message_id, "recipient": agent}
+
     def claim(self, project, agent, lease_min=DEFAULT_LEASE_MIN, wait=0.0,
               poll_interval=2.0):
         """Claim the next pending inbox row for agent. If wait>0, block up to `wait`
@@ -812,6 +1028,17 @@ class Store:
         """Mark a claimed inbox row done (for non-reply work). Fenced by token."""
         with self.write_tx():
             self._verify_lease(message_id, agent, claim_token)
+            # A task must not be silently acked: that would mark it 'done' with NO submitted
+            # result, and a later approval could then accept work that was never produced.
+            # A task is submitted with `complete` (which posts the result) or handed back
+            # with `release`. Only `complete` establishes the acceptance boundary (done_seq).
+            mrow = self.conn.execute(
+                "SELECT type FROM messages WHERE message_id=?", (message_id,)).fetchone()
+            if mrow and mrow["type"] == "task":
+                raise CollabError(
+                    "a task can't be `ack`ed (that would mark it done with no submitted "
+                    "result). Submit it with `complete` (posts your result), or hand it "
+                    "back with `release`.")
             self.conn.execute(
                 "UPDATE inbox SET status='done' WHERE message_id=? AND recipient=?",
                 (message_id, agent),
@@ -853,9 +1080,22 @@ class Store:
         with self.write_tx():
             self._verify_lease(claim_message_id, agent, claim_token)
             src = self.conn.execute(
-                "SELECT from_agent, thread_id FROM messages WHERE message_id=?",
+                "SELECT from_agent, thread_id, type FROM messages WHERE message_id=?",
                 (claim_message_id,),
             ).fetchone()
+            # Completing a TASK must post a genuine, non-empty RESULT — otherwise a worker
+            # could complete with a log-only/empty message, setting done_seq and marking the
+            # task 'submitted' with no actual work. (ack() is already closed for tasks.)
+            if src and src["type"] == "task":
+                if mtype not in RESULT_TYPES:
+                    raise CollabError(
+                        f"a task must be submitted with a result "
+                        f"({'/'.join(RESULT_TYPES)}), not '{mtype}'. To abandon it, use "
+                        "`release`.")
+                if not (body and body.strip()) and not refs:
+                    raise CollabError(
+                        "a task submission needs a non-empty result body or an artifact "
+                        "reference (--artifact/--blob) — an empty completion isn't work.")
             if to_agent is None:
                 to_agent = src["from_agent"] if src else "broadcast"
             if thread_id is None:
@@ -864,9 +1104,23 @@ class Store:
                 project, agent, to_agent, mtype, body,
                 round_=round_, parent=parent, thread_id=thread_id, refs=refs,
                 idempotency_key=idempotency_key, role=role)
+            # A task submission must post a FRESH result. If the idempotency key was
+            # already used (dup), no new message was inserted for this task — a worker
+            # could reuse another task's key to fake a submission. Reject it: a genuine
+            # task completion always creates a new message (a legit retry would already
+            # have failed _verify_lease on the now-done row). This rolls back the tx, so
+            # done_seq is NOT set and the task stays claimed.
+            if src and src["type"] == "task" and dup:
+                raise CollabError(
+                    "this idempotency key was already used for another message — a task "
+                    "submission must post a fresh result; don't reuse a key across tasks.")
+            # done_seq = the seq boundary AFTER this submission's reply message, so only
+            # approvals that come later can qualify the task as accepted.
             self.conn.execute(
-                "UPDATE inbox SET status='done' WHERE message_id=? AND recipient=?",
-                (claim_message_id, agent),
+                "UPDATE inbox SET status='done', done_seq="
+                "(SELECT next_seq FROM projects WHERE name=?) "
+                "WHERE message_id=? AND recipient=?",
+                (project, claim_message_id, agent),
             )
         return {"message_id": mid, "duplicate": dup, "completed": claim_message_id}
 
@@ -905,23 +1159,46 @@ class Store:
         for t in tasks:
             mid = t["message_id"]
             doer = self.conn.execute(
-                "SELECT claimed_by, status FROM inbox WHERE message_id=? "
+                "SELECT claimed_by, status, done_seq FROM inbox WHERE message_id=? "
                 "AND status IN ('claimed','done') LIMIT 1", (mid,),
             ).fetchone()
-            approved_by = sorted(
-                r["from_agent"] for r in self.conn.execute(
-                    "SELECT DISTINCT from_agent FROM messages WHERE project=? "
-                    "AND type='approval' AND thread_id=?", (project, t["thread_id"]),
-                ).fetchall())
+            # A task is accepted ONLY after a worker actually SUBMITTED it (a 'done' inbox
+            # row) AND a qualifying approval came AFTER that submission (seq >= done_seq).
+            # This rejects a pre-approval / rubber-stamp of the spec: the trusted reviewer
+            # must sign off on the SUBMITTED work, not the task before it was done. Only
+            # approvals from agents who are STILL approvers count (a demoted approver's old
+            # sign-off must not linger as authority).
+            submitted = bool(doer and doer["status"] == "done"
+                             and doer["done_seq"] is not None)
+            # The task's OWN submitter can never accept it — recorded permanently as the
+            # done row's claimed_by, so even if that worker is later promoted to approver it
+            # cannot approve its own submission (producer/reviewer separation survives role
+            # changes without needing identity auth).
+            submitter = doer["claimed_by"] if doer else None
+            approved_by = []
+            if submitted:
+                approved_by = sorted(
+                    a for a in (
+                        r["from_agent"] for r in self.conn.execute(
+                            "SELECT DISTINCT from_agent FROM messages WHERE project=? "
+                            "AND type='approval' AND thread_id=? AND seq>=?",
+                            (project, t["thread_id"], doer["done_seq"]),
+                        ).fetchall())
+                    if a in approvers and a != submitter)
             if policy == "all":
-                accepted = bool(approvers) and approvers.issubset(set(approved_by))
+                # 'all' = every ELIGIBLE approver signed off. The task's own submitter is
+                # never eligible to approve it (excluded above), so requiring its approval
+                # would make 'all' unsatisfiable once that worker is promoted to approver.
+                eligible = set(approvers) - ({submitter} if submitter else set())
+                policy_ok = bool(eligible) and eligible.issubset(set(approved_by))
             elif policy.startswith("final:"):
-                accepted = policy[6:].strip() in approved_by
+                policy_ok = policy[6:].strip() in approved_by
             else:  # any
-                accepted = len(approved_by) > 0
+                policy_ok = len(approved_by) > 0
+            accepted = submitted and policy_ok
             if accepted:
                 state = "accepted"
-            elif doer and doer["status"] == "done":
+            elif submitted:
                 state = "submitted"
             elif doer and doer["status"] == "claimed":
                 state = "claimed"
@@ -953,28 +1230,38 @@ class Store:
         - Plain review project (no tasks): if it has approver participants, every one must
           have posted an `approval` first.
         """
-        tasks = self._task_rollup(project)
-        approvals = self._approval_status(project)
-        missing = sorted(a for a, ok in approvals.items() if not ok)
-        if tasks:
-            unaccepted = [t for t in tasks if t["state"] != "accepted"]
-            if unaccepted and not force:
-                policy = self.get_project(project)["accept_policy"] or "any"
-                detail = ", ".join(t["task"][:8] + "=" + t["state"] for t in unaccepted)
-                raise CollabError(
-                    f"decide blocked: {len(unaccepted)} of {len(tasks)} task(s) not yet "
-                    f"accepted under policy '{policy}' ({detail}). A task is accepted when "
-                    "the required approver(s) post an `approval` in its thread. Pass "
-                    "--force to converge anyway.")
-        else:
-            unaccepted = []
-            if missing and not force:
-                raise CollabError(
-                    "decide blocked: approver(s) have not signed off yet: "
-                    f"{', '.join(missing)}. Each approver must post an 'approval' "
-                    "message (`post --type approval`, or `complete --type approval` "
-                    "when draining their inbox). Pass --force to converge anyway.")
+        self.get_project(project)
         with self.write_tx():
+            # Authorize AND evaluate the convergence gate INSIDE the write tx (BEGIN
+            # IMMEDIATE): the owner can't be concurrently demoted between check and
+            # converge (TOCTOU), and the task/approval state can't go stale between the
+            # gate check and the terminal write.
+            dr = self._role_of(project, from_agent)
+            if dr not in GRANTOR_ROLES:
+                raise CollabError(
+                    f"only the initiator/orchestrator may decide/converge '{project}'; "
+                    f"'{from_agent}' is '{dr or 'not a participant'}'.")
+            tasks = self._task_rollup(project)
+            approvals = self._approval_status(project)
+            missing = sorted(a for a, ok in approvals.items() if not ok)
+            if tasks:
+                unaccepted = [t for t in tasks if t["state"] != "accepted"]
+                if unaccepted and not force:
+                    policy = self.get_project(project)["accept_policy"] or "any"
+                    detail = ", ".join(t["task"][:8] + "=" + t["state"] for t in unaccepted)
+                    raise CollabError(
+                        f"decide blocked: {len(unaccepted)} of {len(tasks)} task(s) not "
+                        f"yet accepted under policy '{policy}' ({detail}). A task is "
+                        "accepted when the required approver(s) post an `approval` in its "
+                        "thread. Pass --force to converge anyway.")
+            else:
+                unaccepted = []
+                if missing and not force:
+                    raise CollabError(
+                        "decide blocked: approver(s) have not signed off yet: "
+                        f"{', '.join(missing)}. Each approver must post an 'approval' "
+                        "message (`post --type approval`, or `complete --type approval` "
+                        "when draining their inbox). Pass --force to converge anyway.")
             mid, dup = self._insert_message(
                 project, from_agent, "broadcast", "decision", body,
                 thread_id=thread_id, parent=parent,
@@ -1492,10 +1779,19 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
                     print(f"[watch] could not stall {cm[:8]} ({e}); lease no longer held",
                           file=log_fh, flush=True)
             else:
-                # leave the claim to expire so the sweeper redelivers it
-                print(f"[watch] agent failed (rc={rc}); leaving for redelivery "
-                      f"({deliveries}/{max_deliveries}). stderr: "
-                      f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
+                # The handler failed but this watcher is still alive, so NACK the claim
+                # (token-fenced release) to return it to the queue immediately — prompt
+                # recovery instead of waiting out the whole lease. Falls back to leaving
+                # it for lease expiry if the release can't go through (lease already lost).
+                try:
+                    store.release(project, agent, cm, tok)
+                    print(f"[watch] agent failed (rc={rc}); released for redelivery "
+                          f"({deliveries}/{max_deliveries}). stderr: "
+                          f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
+                except CollabError:
+                    print(f"[watch] agent failed (rc={rc}); lease already lost, leaving "
+                          f"for sweep ({deliveries}/{max_deliveries}). stderr: "
+                          f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
             if once:
                 break
             continue
@@ -1645,6 +1941,15 @@ def build_parser():
     s.add_argument("--message", required=True)
     s.add_argument("--claim-token", required=True)
 
+    s = sub.add_parser("release",
+                       help="nack: hand your own claim back to the queue (token-fenced) "
+                            "for prompt redelivery on handler failure")
+    s.add_argument("--project", required=True)
+    s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
+                   help="agent id; defaults to $COLLAB_AGENT")
+    s.add_argument("--message", required=True)
+    s.add_argument("--claim-token", required=True)
+
     s = sub.add_parser("extend", help="extend a lease (heartbeat)")
     s.add_argument("--project", required=True)
     s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
@@ -1744,10 +2049,22 @@ def build_parser():
     s.add_argument("--project", required=True)
 
     s = sub.add_parser(
+        "grant", help="owner assigns a role to an agent (the only way to confer "
+                      "approver/orchestrator)")
+    s.add_argument("--project", required=True)
+    s.add_argument("--by", dest="by_agent", default=os.environ.get("COLLAB_AGENT"),
+                   help="granter id (must be initiator/orchestrator); defaults to $COLLAB_AGENT")
+    s.add_argument("--agent", required=True, help="agent receiving the role")
+    s.add_argument("--role", required=True, choices=ROLES)
+
+    s = sub.add_parser(
         "policy", help="show or set a plan's task acceptance policy (any|all|final:<id>)")
     s.add_argument("--project", required=True)
     s.add_argument("--set", dest="set_policy", default=None,
                    help="new policy: any | all | final:<agent-id>")
+    s.add_argument("--by", dest="by_agent", default=os.environ.get("COLLAB_AGENT"),
+                   help="actor changing the policy (must be initiator/orchestrator); "
+                        "defaults to $COLLAB_AGENT")
 
     s = sub.add_parser(
         "next",
@@ -1788,6 +2105,12 @@ def build_parser():
                    help="exit when the queue is empty instead of waiting")
     s.add_argument("--max", dest="max_items", type=int,
                    help="exit after N processed items")
+    s.add_argument("--detach", action="store_true",
+                   help="daemonize (double-fork + new session) so the watcher OUTLIVES "
+                        "the launching shell — required when an agent launches it from a "
+                        "transient per-turn shell, or it dies when that shell is torn down")
+    s.add_argument("--log", help="log file for --detach (default "
+                                 "$COLLAB_ROOT/logs/<project>-<agent>.log)")
     s.add_argument(
         "--exec", dest="exec_argv", nargs=argparse.REMAINDER, required=True,
         help="agent command + args (everything after --exec). "
@@ -1796,14 +2119,36 @@ def build_parser():
     return p
 
 
+def _daemonize(log_path):
+    """POSIX double-fork + setsid so the watcher survives the launching shell's teardown
+    (an agent's per-turn tool-call shell, a closed terminal, a process-group kill). The
+    new session is the key: a signal to the parent's process group won't reach us. All
+    output is redirected to log_path. The caller must reopen any sqlite connection AFTER
+    this (connections must not cross fork())."""
+    d = os.path.dirname(os.path.abspath(log_path))
+    os.makedirs(d, exist_ok=True)
+    if os.fork() > 0:
+        os._exit(0)               # original process returns to the launcher
+    os.setsid()                   # NEW session — immune to the parent pgid's signals
+    if os.fork() > 0:
+        os._exit(0)               # can't reacquire a controlling terminal
+    sys.stdout.flush()
+    sys.stderr.flush()
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    nul = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(nul, 0)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     # Resolve agent identity: an explicit flag wins, else $COLLAB_AGENT (set by the
     # argparse defaults). Fail clearly if a command needs an identity and none resolved.
     # doctor intentionally omitted: it must run even when identity is missing, since
     # diagnosing a missing/duplicate COLLAB_AGENT is one of its jobs.
-    NEED_AGENT = {"start", "join", "poll", "claim", "ack", "extend", "heartbeat",
-                  "watch", "review", "inbox", "next"}
+    NEED_AGENT = {"start", "join", "poll", "claim", "ack", "release", "extend",
+                  "heartbeat", "watch", "review", "inbox", "next"}
     NEED_FROM = {"post", "complete", "decide"}
     if args.cmd in NEED_AGENT and not getattr(args, "agent", None):
         print(json.dumps({"error": "no agent identity: pass --agent or set "
@@ -1853,6 +2198,8 @@ def main(argv=None):
                                  role=args.role))
         elif cmd == "ack":
             _emit(store.ack(args.project, args.agent, args.message, args.claim_token))
+        elif cmd == "release":
+            _emit(store.release(args.project, args.agent, args.message, args.claim_token))
         elif cmd == "extend":
             _emit(store.extend(args.project, args.agent, args.message,
                                args.claim_token, args.lease_min))
@@ -1926,9 +2273,15 @@ def main(argv=None):
             _emit(store.doctor(args.project, args.agent))
         elif cmd == "sweep":
             _emit({"reset": store.sweep(args.project)})
+        elif cmd == "grant":
+            if not args.by_agent:
+                raise CollabError("no granter identity: pass --by or set COLLAB_AGENT")
+            _emit(store.grant_role(args.project, args.by_agent, args.agent, args.role))
         elif cmd == "policy":
             if args.set_policy is not None:
-                _emit(store.set_accept_policy(args.project, args.set_policy))
+                if not args.by_agent:
+                    raise CollabError("no actor identity: pass --by or set COLLAB_AGENT")
+                _emit(store.set_accept_policy(args.project, args.by_agent, args.set_policy))
             else:
                 pr = store.get_project(args.project)
                 _emit({"project": args.project,
@@ -1942,6 +2295,13 @@ def main(argv=None):
         elif cmd == "watch":
             if not args.exec_argv:
                 raise CollabError("--exec requires an agent command, e.g. --exec codex exec")
+            if getattr(args, "detach", False):
+                log = args.log or os.path.join(
+                    store.root, "logs", f"{args.project}-{args.agent}.log")
+                store.close()                       # don't carry a connection across fork
+                print(json.dumps({"detached": True, "log": log}), flush=True)
+                _daemonize(log)
+                store = Store(args.root)             # fresh connection in the daemon
             n = watch(store, args.project, args.agent, args.exec_argv,
                       poll_interval=args.poll_interval, once=args.once,
                       idle_exit=args.idle_exit, max_items=args.max_items,

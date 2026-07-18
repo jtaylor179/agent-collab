@@ -88,6 +88,8 @@ complete --project X --claim-message <id> --claim-token <tok> --type response (-
             [--round N] [--to <agent>] [--parent <id>] [--thread <id>] [--artifact <name>@vN] \
             [--blob <path>] [--role <role>] [--idempotency-key <k>]   # --round optional (no default)
 ack      --project X --message <id> --claim-token <tok>                # finish, no reply
+release  --project X --message <id> --claim-token <tok>                # nack: hand your claim back (prompt redelivery on failure)
+grant    --project X --by <owner> --agent <id> --role <role>           # owner assigns a role (only way to confer approver/orchestrator)
 extend   --project X --message <id> --claim-token <tok> [--lease-min 10]
 decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent <id>] [--idempotency-key <k>] [--force]
             # binding; converges + clears this project's pending AND claimed inbox rows.
@@ -136,10 +138,19 @@ trusted to accept the work, use the task-queue model (ADR-0001):
   out to the **worker pool** (not reviewers) and is **work-stealing**: the first worker
   to `claim` it wins, the rest are preempted. If that worker dies, `sweep`/`reclaim`
   reopens it to the whole pool — any interchangeable worker re-steals it.
-- **Trusted-reviewer gate (enforced):** only an `approver` may post an `approval`; a
-  worker/orchestrator/plain-reviewer/non-participant is rejected by the bus. So a worker
-  can never certify its own code. WHO is trusted is configurable — you pick who joins as
-  `approver` (not hardcoded to any agent).
+- **Trusted-reviewer gate:** only an `approver` may post an `approval`; a
+  worker/orchestrator/plain-reviewer/non-participant is rejected. An authority role
+  (`approver`/`orchestrator`) can't be self-assigned via `join` — the owner **grants** it:
+  `grant --by <orchestrator> --agent <id> --role approver`. WHO is trusted is your choice
+  (not hardcoded to any agent). *Scope:* identity is trusted by convention (the bus has no
+  auth — it's a local, single-user tool where you launch every agent), so this enforcement
+  prevents ACCIDENTAL self-elevation (a watcher auto-joining the wrong role, a confused
+  agent), not a malicious process that forges another agent's id. See ADR-0001 "Threat
+  model."
+- **Acceptance requires real work:** a task is `accepted` only after a worker actually
+  submitted it (a `done` inbox row) AND the policy's approvals are in from *current*
+  approvers — an approval alone can't rubber-stamp an unworked task. Only the
+  initiator/orchestrator may `decide`/converge.
 - **Acceptance policy (who's the final say):** `start --accept-policy` (or `policy --set`)
   chooses when a task is `accepted`: `any` (default — any one approver accepts), `all`
   (every approver must approve it), or `final:<agent-id>` (only that designated reviewer's
@@ -277,7 +288,9 @@ multi-worker plans" above for the mechanics). You are the **orchestrator**.
    `codex-1`, `copilot-1`, `cursor-1`, `antigravity-1` (and/or `claude-1`). Any agent can
    be a worker; they need not be trusted reviewers.
 2. **Trusted reviewers** (multi-select) — who may **accept** work; each joins as
-   `approver`. Only these can post an `approval`; a worker can never accept its own code.
+   `approver`. Only these can post an `approval` — the role check rejects an approval from
+   any non-approver identity (for correctly-identified clients; identity is trusted by
+   convention, see "Scope" above).
 3. **Acceptance policy** — whose sign-off is the final say: `any` (default — any one
    trusted reviewer accepts a task), `all` (every trusted reviewer must approve it), or
    `final:<agent-id>` (one designated final reviewer). Maps to `--accept-policy`.

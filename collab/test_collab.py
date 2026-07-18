@@ -871,7 +871,7 @@ class TestApproverRole(Base):
         s = self.s
         s.start("A", "spec", "converge", "claude-1")
         s.join("A", "codex-1")                     # plain reviewer
-        s.join("A", "copilot-1", role="approver")  # secondary approver
+        s.grant_role("A", "claude-1", "copilot-1", "approver")  # owner grants approver
         s.put_artifact("A", "spec.md", b"# v1\n", "claude-1")
         s.post("A", "claude-1", "broadcast", "review_request", "review spec.md@v1",
                round_=1, refs={"artifact": "spec.md@v1"})
@@ -887,7 +887,7 @@ class TestApproverRole(Base):
         s = self.s
         s.start("A", "spec", "converge", "claude-1")
         s.post("A", "claude-1", "broadcast", "review_request", "review this", round_=1)
-        out = s.join("A", "copilot-1", role="approver")
+        out = s.grant_role("A", "claude-1", "copilot-1", "approver")
         self.assertEqual(out["role"], "approver")
         self.assertEqual(out["backfilled"], 1)
 
@@ -970,7 +970,10 @@ class TestWatcherApprover(Base):
     def _project(self, approver_role):
         s = self.s
         s.start("A", "t", "g", "claude-1")
-        s.join("A", "copilot-1", role=approver_role)
+        if approver_role in ("approver", "orchestrator"):
+            s.grant_role("A", "claude-1", "copilot-1", approver_role)  # owner grants
+        else:
+            s.join("A", "copilot-1", role=approver_role)
         s.put_artifact("A", "spec.md", b"# v1\n", "claude-1")
         s.post("A", "claude-1", "broadcast", "review_request", "review spec.md@v1",
                round_=1, refs={"artifact": "spec.md@v1"})
@@ -1224,7 +1227,7 @@ class TestOrchestratedPlan(Base):
         for w in workers:
             s.join("P", w, role="worker")
         for a in approvers:
-            s.join("P", a, role="approver")
+            s.grant_role("P", "orch-1", a, "approver")  # orchestrator grants approver
         return s
 
     def _post_task(self, s, body="do subtask X"):
@@ -1369,11 +1372,18 @@ class TestAcceptPolicy(Base):
         s.start("P", "t", "g", "orch-1", role="orchestrator", accept_policy=policy)
         s.join("P", "w1", role="worker")
         for a in approvers:
-            s.join("P", a, role="approver")
+            s.grant_role("P", "orch-1", a, "approver")  # orchestrator grants approver
         return s
 
     def _task(self, s):
         return s.post("P", "orch-1", "broadcast", "task", "do X", round_=1)["message_id"]
+
+    def _submit(self, s):
+        """A worker actually does the task and SUBMITS a result (claim -> complete) —
+        acceptance requires a real submission (a task can't be silently acked)."""
+        c = s.claim("P", "w1")
+        s.complete("P", "w1", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")
 
     def _approve(self, s, approver, task_id):
         s.post("P", approver, "broadcast", "approval", "ok", thread_id=task_id)
@@ -1386,6 +1396,7 @@ class TestAcceptPolicy(Base):
     def test_any_one_approver_accepts(self):
         s = self._plan("any")
         t = self._task(s)
+        self._submit(s)
         self._approve(s, "a1", t)
         self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
         self.assertEqual(s.decide("P", "orch-1", "go")["state"], "converged")
@@ -1393,6 +1404,7 @@ class TestAcceptPolicy(Base):
     def test_all_requires_every_approver(self):
         s = self._plan("all")
         t = self._task(s)
+        self._submit(s)
         self._approve(s, "a1", t)
         self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")  # a2 missing
         with self.assertRaises(CollabError):
@@ -1404,6 +1416,7 @@ class TestAcceptPolicy(Base):
     def test_final_requires_designated_reviewer(self):
         s = self._plan("final:a2")
         t = self._task(s)
+        self._submit(s)
         self._approve(s, "a1", t)  # a non-final approver's OK is non-binding
         self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")
         with self.assertRaises(CollabError):
@@ -1416,7 +1429,8 @@ class TestAcceptPolicy(Base):
 
     def test_set_and_get_policy(self):
         s = self._plan("any")
-        self.assertEqual(s.set_accept_policy("P", "final:a1")["accept_policy"], "final:a1")
+        self.assertEqual(
+            s.set_accept_policy("P", "orch-1", "final:a1")["accept_policy"], "final:a1")
         self.assertEqual(s.status("P")["accept_policy"], "final:a1")
 
     def test_invalid_policy_rejected(self):
@@ -1425,4 +1439,278 @@ class TestAcceptPolicy(Base):
             s.start("P", "t", "g", "o", role="orchestrator", accept_policy="bogus")
         s.start("Q", "t", "g", "o", role="orchestrator")
         with self.assertRaises(CollabError):
-            s.set_accept_policy("Q", "final:")  # empty id
+            s.set_accept_policy("Q", "o", "final:")  # empty id
+
+
+class TestCodexReviewFixes(Base):
+    """v0.4.1: fixes for the issues Codex found reviewing v0.4.0 (dogfood BLOCK)."""
+
+    def _plan(self):
+        s = self.s
+        s.start("P", "t", "g", "orch-1", role="orchestrator")
+        s.join("P", "wA", role="worker")
+        return s
+
+    # #1 late-join backfill must not break work-stealing exclusivity
+    def test_late_join_after_claim_is_preempted(self):
+        s = self._plan()
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        s.claim("P", "wA")                     # wA holds it
+        s.join("P", "wB", role="worker")       # wB joins LATE
+        self.assertIsNone(s.claim("P", "wB"))  # must NOT be able to also do it
+        st = s.conn.execute("SELECT status FROM inbox WHERE message_id=? AND recipient=?",
+                            (tid, "wB")).fetchone()["status"]
+        self.assertEqual(st, "preempted")
+
+    def test_late_join_after_done_cannot_redo(self):
+        s = self._plan()
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        c = s.claim("P", "wA")
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")  # task submitted/done
+        s.join("P", "wB", role="worker")
+        self.assertIsNone(s.claim("P", "wB"))  # cannot redo completed work
+
+    def test_task_cannot_be_acked(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "task", "x", round_=1)
+        c = s.claim("P", "wA")
+        with self.assertRaises(CollabError):   # a task needs complete/release, not ack
+            s.ack("P", "wA", c["claim_message_id"], c["claim_token"])
+
+    # round-7 fix: completing a task requires a genuine, non-empty result — not a
+    # log-only/empty message that would fake a submission.
+    def test_task_complete_requires_real_result(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "task", "x", round_=1)
+        c = s.claim("P", "wA")
+        cm, tok = c["claim_message_id"], c["claim_token"]
+        with self.assertRaises(CollabError):                       # log-only type
+            s.complete("P", "wA", cm, tok, "heartbeat", "")
+        with self.assertRaises(CollabError):                       # empty result body
+            s.complete("P", "wA", cm, tok, "review_request", "   ")
+        # a real, non-empty result is accepted
+        ok = s.complete("P", "wA", cm, tok, "review_request", "here is my work",
+                        to_agent="broadcast")
+        self.assertFalse(ok["duplicate"])
+
+    def test_task_complete_rejects_reused_idempotency_key(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "task", "A", round_=1)
+        tB = s.post("P", "orch-1", "broadcast", "task", "B", round_=1)["message_id"]
+        cA = s.claim("P", "wA")                       # task A (lower seq)
+        s.complete("P", "wA", cA["claim_message_id"], cA["claim_token"],
+                   "review_request", "result A", to_agent="broadcast", idempotency_key="K")
+        cB = s.claim("P", "wA")                        # task B
+        # reusing A's key posts NO new result for B -> must be rejected
+        with self.assertRaises(CollabError):
+            s.complete("P", "wA", cB["claim_message_id"], cB["claim_token"],
+                       "review_request", "result B", to_agent="broadcast",
+                       idempotency_key="K")
+        # B stays unsubmitted (not faked into 'submitted'/'accepted')
+        state = {t["task"]: t["state"] for t in s._task_rollup("P")}[tB]
+        self.assertIn(state, ("todo", "claimed"))
+
+    # #2a acceptance requires a real worker submission, not just an approval
+    def test_approval_without_submission_does_not_accept(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "rev", "approver")
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        s.post("P", "rev", "broadcast", "approval", "ok", thread_id=tid)  # premature
+        self.assertEqual(s._task_rollup("P")[0]["state"], "todo")
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")      # gate holds — nothing submitted
+
+    # #2b only the initiator/orchestrator may decide
+    def test_only_owner_can_decide(self):
+        s = self._plan()
+        with self.assertRaises(CollabError):
+            s.decide("P", "wA", "go")          # a worker
+        with self.assertRaises(CollabError):
+            s.decide("P", "stranger", "go")    # a non-participant
+        self.assertEqual(s.decide("P", "orch-1", "go")["state"], "converged")
+
+    # #2c authority roles must be granted, not self-assigned
+    def test_worker_cannot_self_assign_approver(self):
+        s = self._plan()
+        with self.assertRaises(CollabError):
+            s.join("P", "wA", role="approver")           # self-elevation blocked
+        with self.assertRaises(CollabError):
+            s.grant_role("P", "wA", "wB", "approver")    # non-owner can't grant
+        out = s.grant_role("P", "orch-1", "claude-1", "approver")  # owner can
+        self.assertEqual(out["role"], "approver")
+
+    # #2d demoted approver's sign-off stops counting; final:<id> must be an approver
+    def test_demoted_approver_approval_stops_counting(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "a1", "approver")
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        c = s.claim("P", "wA")
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")
+        s.post("P", "a1", "broadcast", "approval", "ok", thread_id=tid)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+        s.grant_role("P", "orch-1", "a1", "worker")      # demote a1
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")
+
+    def test_final_reviewer_must_be_approver(self):
+        s = self._plan()                                  # wA is a worker
+        with self.assertRaises(CollabError):
+            s.set_accept_policy("P", "orch-1", "final:wA")
+
+    # round-2 fixes: authenticate policy changes + continuous final-reviewer invariant
+    def test_policy_change_requires_owner(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "appr", "approver")
+        for who in ("wA", "appr", "stranger"):   # worker, approver, non-participant
+            with self.assertRaises(CollabError):
+                s.set_accept_policy("P", who, "any")
+        self.assertEqual(
+            s.set_accept_policy("P", "orch-1", "all")["accept_policy"], "all")
+
+    def test_final_reviewer_cannot_be_demoted_or_downgraded(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "fin", "approver")
+        s.set_accept_policy("P", "orch-1", "final:fin")
+        # can't demote the final reviewer to a non-approver role...
+        with self.assertRaises(CollabError):
+            s.grant_role("P", "orch-1", "fin", "worker")
+        # ...and an id NAMED as final reviewer but not yet joined can't slip in as a
+        # non-approver (which would leave an unsatisfiable policy)
+        s.set_accept_policy("P", "orch-1", "final:ghost")
+        with self.assertRaises(CollabError):
+            s.join("P", "ghost", role="reviewer")
+        # change the policy away first, THEN reassignment is allowed
+        s.set_accept_policy("P", "orch-1", "any")
+        self.assertEqual(s.grant_role("P", "orch-1", "fin", "worker")["role"], "worker")
+
+    # round-3 fix: authorization is evaluated against CURRENT role (checked in-tx), so a
+    # demoted grantor/decider is rejected — no TOCTOU window on stale role.
+    def test_demoted_owner_loses_grant_and_decide(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "orch2", "orchestrator")   # orch-1 grants a 2nd owner
+        s.grant_role("P", "orch2", "orch-1", "worker")          # orch2 demotes orch-1
+        with self.assertRaises(CollabError):
+            s.grant_role("P", "orch-1", "x", "approver")        # demoted -> can't grant
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")                       # demoted -> can't decide
+        self.assertEqual(s.decide("P", "orch2", "go")["state"], "converged")  # current owner can
+
+    # round-5 fix: an approval posted BEFORE the worker submitted must not count — the
+    # reviewer has to sign off on the submitted work, not rubber-stamp the spec.
+    def test_pre_submission_approval_does_not_count(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "rev", "approver")
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        s.post("P", "rev", "broadcast", "approval", "pre-approve the spec", thread_id=tid)
+        c = s.claim("P", "wA")
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],   # submit AFTER approval
+                   "review_request", "result", to_agent="broadcast")
+        # the stale pre-approval must not accept the task
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")
+        # a fresh approval AFTER the submission accepts it
+        s.post("P", "rev", "broadcast", "approval", "reviewed the work", thread_id=tid)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+
+    # round-11 fix: a role change reconciles the inbox — a promoted worker can't keep its
+    # task rows (and thus can't claim+complete then approve the same task).
+    def test_promotion_reconciles_inbox(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "task", "x", round_=1)
+        self.assertEqual(len(s.poll("P", "wA")), 1)          # wA has the task
+        s.grant_role("P", "orch-1", "wA", "approver")        # promote worker -> approver
+        self.assertIsNone(s.claim("P", "wA"))                # can't claim its former task
+        n = s.conn.execute(
+            "SELECT COUNT(*) c FROM inbox i JOIN messages m USING(message_id) "
+            "WHERE i.recipient='wA' AND m.type='task'").fetchone()["c"]
+        self.assertEqual(n, 0)                               # task rows removed
+
+    def test_role_change_rejected_while_holding_incompatible_claim(self):
+        s = self._plan()
+        s.post("P", "orch-1", "broadcast", "task", "x", round_=1)
+        c = s.claim("P", "wA")                               # wA holds a task claim
+        with self.assertRaises(CollabError):
+            s.grant_role("P", "orch-1", "wA", "approver")    # can't promote mid-claim
+        s.release("P", "wA", c["claim_message_id"], c["claim_token"])
+        self.assertEqual(                                    # after release, promotion works
+            s.grant_role("P", "orch-1", "wA", "approver")["role"], "approver")
+
+    # round-12 fix: a task's own submitter can NEVER accept it, even after being promoted
+    # to approver (recorded permanently as the done row's claimed_by).
+    def test_submitter_cannot_approve_own_task_after_promotion(self):
+        s = self._plan()
+        s.grant_role("P", "orch-1", "other", "approver")     # a separate trusted reviewer
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        c = s.claim("P", "wA")                               # wA does the work
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],
+                   "review_request", "my result", to_agent="broadcast")
+        s.grant_role("P", "orch-1", "wA", "approver")        # wA is promoted
+        s.post("P", "wA", "broadcast", "approval", "self-approve", thread_id=tid)
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")  # own approval ignored
+        with self.assertRaises(CollabError):
+            s.decide("P", "orch-1", "go")
+        # a DIFFERENT approver's sign-off does accept it
+        s.post("P", "other", "broadcast", "approval", "ok", thread_id=tid)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+
+    # round-13 fix: excluding the submitter must not make `all` unsatisfiable, and
+    # final:<submitter> must be rejected.
+    def test_all_policy_satisfiable_after_submitter_promoted(self):
+        s = self.s
+        s.start("P", "t", "g", "orch-1", role="orchestrator", accept_policy="all")
+        s.join("P", "wA", role="worker")
+        s.grant_role("P", "orch-1", "a2", "approver")        # a second, non-submitting approver
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        c = s.claim("P", "wA")
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")
+        s.grant_role("P", "orch-1", "wA", "approver")        # submitter promoted -> approver
+        # `all` must require only the ELIGIBLE (non-submitter) approvers: a2 alone accepts
+        s.post("P", "wA", "broadcast", "approval", "self", thread_id=tid)   # ignored
+        self.assertNotEqual(s._task_rollup("P")[0]["state"], "accepted")
+        s.post("P", "a2", "broadcast", "approval", "ok", thread_id=tid)
+        self.assertEqual(s._task_rollup("P")[0]["state"], "accepted")
+
+    def test_final_cannot_designate_a_submitter(self):
+        s = self._plan()                                     # orch-1, wA worker
+        tid = s.post("P", "orch-1", "broadcast", "task", "x", round_=1)["message_id"]
+        c = s.claim("P", "wA")
+        s.complete("P", "wA", c["claim_message_id"], c["claim_token"],
+                   "review_request", "result", to_agent="broadcast")
+        s.grant_role("P", "orch-1", "wA", "approver")        # wA is now an approver...
+        with self.assertRaises(CollabError):                 # ...but it submitted this task
+            s.set_accept_policy("P", "orch-1", "final:wA")
+
+    # round-4 fix: join() reads project state INSIDE its tx, so a join racing a decide()
+    # can't backfill pending work into an already-converged project.
+    def test_join_after_convergence_does_not_backfill(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.post("A", "claude-1", "broadcast", "review_request", "r", round_=1)
+        s.decide("A", "claude-1", "done")            # project converged
+        out = s.join("A", "codex-1")                 # late join into a converged project
+        self.assertEqual(out["backfilled"], 0)
+        self.assertEqual(len(s.poll("A", "codex-1")), 0)  # no pending work injected
+
+    # #4 release/nack returns the claim promptly and restores the task pool
+    def test_release_returns_claim_and_is_token_fenced(self):
+        s = self.s
+        s.start("P", "t", "g", "claude-1")
+        s.join("P", "codex-1")
+        s.post("P", "claude-1", "codex-1", "review_request", "r", round_=1)
+        c = s.claim("P", "codex-1")
+        with self.assertRaises(CollabError):
+            s.release("P", "codex-1", c["claim_message_id"], "bad-token")
+        s.release("P", "codex-1", c["claim_message_id"], c["claim_token"])
+        self.assertEqual(len(s.poll("P", "codex-1")), 1)  # immediately reclaimable
+
+    def test_release_restores_task_pool(self):
+        s = self._plan()
+        s.join("P", "wB", role="worker")
+        s.post("P", "orch-1", "broadcast", "task", "x", round_=1)
+        cA = s.claim("P", "wA")
+        self.assertIsNone(s.claim("P", "wB"))             # sibling preempted
+        s.release("P", "wA", cA["claim_message_id"], cA["claim_token"])
+        self.assertIsNotNone(s.claim("P", "wB"))          # pool reopened to wB

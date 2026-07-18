@@ -61,6 +61,19 @@ case "$agent_arg" in
 esac
 
 echo "collab-watch: agent=$agent project=$project root=$COLLAB_ROOT repo=$PWD exec=${exec_argv[*]}" >&2
+
+# COLLAB_WATCH_DETACH=1 makes the watcher daemonize (double-fork + setsid) so it OUTLIVES
+# the shell that launched it. Set this whenever an AGENT launches the watcher from its
+# transient per-turn shell (Cursor/Claude/etc.) — otherwise the watcher is a child of
+# that shell's process group and is killed when the turn ends, orphaning its claim every
+# round. Interactive/terminal use can leave it unset to keep the watcher in the
+# foreground. The detach flag is added to the watcher args below.
+detach_args=()
+if [ "${COLLAB_WATCH_DETACH:-0}" = "1" ]; then
+  detach_args=(--detach)
+  [ -n "${COLLAB_WATCH_LOG:-}" ] && detach_args+=(--log "$COLLAB_WATCH_LOG")
+fi
+
 # shellcheck disable=SC2086  # COLLAB_WATCH_ARGS is intentionally word-split
 exec python3 "$BIN" watch --project "$project" --agent "$agent" \
-  ${COLLAB_WATCH_ARGS:-} --exec "${exec_argv[@]}"
+  ${detach_args[@]+"${detach_args[@]}"} ${COLLAB_WATCH_ARGS:-} --exec "${exec_argv[@]}"

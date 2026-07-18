@@ -7,7 +7,8 @@
 
 > **Decision:** Option B accepted and shipped in v0.4.0. Workers confirmed exactly
 > interchangeable (any agent does code); reviewers gated to `claude-1`/`codex-1` — the
-> trust boundary is bus-enforced (only an `approver` may accept). Phase 0 scaffold was
+> trusted-reviewer gate is role-checked — an approval under a non-approver identity is
+> rejected (for correctly-identified clients; see Threat model). Phase 0 scaffold was
 > skipped; built the hardened version directly. Delivered: `worker`/`orchestrator` roles,
 > `task` type with work-stealing + dead-worker re-steal, approver-only acceptance,
 > `status.tasks` roll-up, `decide` gated on all-tasks-accepted, `next` for worker/
@@ -19,6 +20,30 @@
 > final:<id>` (`start --accept-policy` / `policy --set`, persisted via an idempotent
 > `accept_policy` column migration) so a plan chooses whether any one approver, every
 > approver, or one designated final reviewer must sign off. +6 tests (92 total).
+
+## Threat model (security scope)
+
+agent-collab is a **local, single-user** tool: every agent (`claude-1`, `codex-1`,
+`copilot-1`, `cursor-1`, `antigravity-1`) is launched by the same person on one machine
+against a local-disk bus (`$HOME/.collab`). **Agent identity is trusted by convention, not
+authenticated** — it's the self-asserted `COLLAB_AGENT` / `--from` / `--by` string; the bus
+has no credentials.
+
+Within that model, the role/authority enforcement (only an `approver` may accept;
+`approver`/`orchestrator` are granted, not self-assigned; only the owner may
+`decide`/change `accept_policy`; acceptance requires a real post-submission approval) exists
+to prevent **accidental or buggy self-elevation** — a watcher auto-joining with the wrong
+role, a confused agent, a copy-paste slip — and to make the intended workflow the path of
+least resistance. It is defense against *mistakes*, not against a *malicious* local process.
+
+It explicitly does **NOT** defend against a process that deliberately forges another
+agent's id: anything that can write to `$HOME/.collab` and set `COLLAB_AGENT` is already
+inside the trust boundary and has fully compromised the bus regardless. Defending against
+adversarial participants would require per-agent authenticated tokens (issued at
+join/grant, verified on every mutating call, not overridable by CLI args) — deliberately
+out of scope for the local cooperative model, and tracked as a possible future item if a
+multi-tenant/networked deployment ever needs it. (Raised by Codex in the v0.4.1 dogfood
+review; resolved by scoping the claim honestly rather than building auth.)
 
 ## Context
 
@@ -38,8 +63,10 @@ shape the whole design:
 2. **Only `claude-1` and `codex-1` are trusted to review code** — any agent may *produce*
    code, but only these two may *accept* it. This is a trust boundary, and the owner's
    phrasing ("I only trust claude code and codex to review") means it should be
-   **enforced by the bus**, not left to orchestrator convention — otherwise a worker
-   could post a self-accepting review.
+   **checked by the bus's role rules**, not left to orchestrator convention — so a
+   non-approver identity's approval is rejected rather than mis-accepted. (Enforced for
+   correctly-identified clients; the bus does not authenticate identities — see Threat
+   model.)
 
 The orchestrator does **two distinct jobs**, which must not be conflated:
 - **Coordination / assignment** — hand tasks to workers, load-balance, recover dropped work.
@@ -61,8 +88,10 @@ The bus already covers pieces of both and we should reuse them:
 **Functional**
 - FR1 — Orchestrator posts a set of tasks for one plan; any worker claims a *distinct*
   task (no double-work) and posts a result.
-- FR2 — A task result is accepted only by a **trusted reviewer** (`claude-1`/`codex-1`);
-  a worker cannot accept its own (or any) task.
+- FR2 — A task result is accepted only by a **trusted reviewer** (an `approver`); the role
+  check rejects an approval posted under a non-approver identity. (For correctly-identified
+  cooperating clients — the bus does not authenticate which process owns an identity; see
+  the Threat model section.)
 - FR3 — Orchestrator arbitrates plan convergence per an explicit policy (default: every
   task accepted by a trusted reviewer).
 - FR4 — Dropped work self-heals (dead worker → task re-queued). *(reclaim, done.)*
@@ -73,12 +102,15 @@ The bus already covers pieces of both and we should reuse them:
 - Durable + crash-safe (SQLite, atomic `complete`), consistent with current guarantees.
 - **Additive** — must not change `decide`'s project-atomic semantics or existing roles'
   behavior. Composes with `next` / `reclaim` / `collab-loop`.
-- Trust boundary is bus-enforced, not convention.
+- Role checks reject approval/authority actions from non-approver identities — for
+  correctly-identified cooperating clients. (The bus does not authenticate which process
+  owns an identity; see the Threat model section. This is defense against accidental
+  misuse, not a malicious forged identity.)
 
 ## Decision
 
 Introduce an **orchestrated plan as a single project containing a claimable task queue**,
-with an `orchestrator` role that owns plan-level convergence and a **bus-enforced
+with an `orchestrator` role that owns plan-level convergence and a **role-checked
 trusted-reviewer gate** built on the existing `approver` machinery. Keep "project =
 atomic convergence unit"; the plan *is* the project. Ship it in two phases (validate the
 coordination pattern with zero schema, then make it first-class).
@@ -112,8 +144,9 @@ calls `decide` when done. No bus changes.
 
 **Pros:** fastest to validate the coordination pattern; nothing to migrate; proves the
 loop before committing schema.
-**Cons:** violates the "bus-enforced trust" requirement — a worker could post a
-`response` that the orchestrator mis-accepts; `task` vs `review` not first-class (so
+**Cons:** fails the role-check requirement (FR2) — acceptance is only convention here, so
+even a correctly-identified worker's `response` could be mis-accepted by the orchestrator;
+`task` vs `review` not first-class (so
 `next`/`status` can't distinguish do-work from review-work); no durable plan/task state.
 
 ### Option B: Orchestrator role + task queue + trusted-reviewer gate (single project) — RECOMMENDED
@@ -126,7 +159,7 @@ Add `worker`/`orchestrator` roles and a `task` type in one project. Trusted revi
 | Complexity | Medium (new roles, one type, per-task acceptance) |
 | Cost | One focused change; heavy reuse of approver + claim + next |
 | Scalability | Good (parallel claim; single project = one hot SQLite db) |
-| Trust boundary | **Bus-enforced** (workers aren't approvers → can't accept) |
+| Trust boundary | **Role-checked** (a non-approver identity's approval is rejected; identity trusted by convention — see Threat model) |
 | Durability | Strong (task state persisted in the bus) |
 
 **Pros:** meets FR2 by construction; `task` first-class so `next`/`status` see the queue;
@@ -160,8 +193,9 @@ sign-off.
 The deciding force is constraint #2. "Only claude/codex may review" is a **security/trust
 requirement**, and Option A can only satisfy it by convention — the orchestrator has to be
 trusted to filter correctly, and a malformed or malicious worker message can slip through.
-Options B and C enforce it structurally (a worker isn't an approver, so its message can
-never accept a task). Between B and C, constraint #1 (interchangeable, homogeneous work)
+Options B and C enforce it with a role check (a worker isn't an approver, so an approval
+posted under a non-approver identity is rejected — for correctly-identified clients; the
+bus doesn't authenticate identity, see Threat model). Between B and C, constraint #1
 removes C's advantage: independent per-task convergence is ceremony we don't need when any
 worker can do any task and the plan converges as one unit. B pays for the trust boundary
 with a modest, well-reused schema delta and keeps the lightweight single-queue model the
@@ -179,7 +213,8 @@ destination (it fails the trust requirement); it's a scaffold.
 
 **Easier**
 - Add throughput by launching more workers — no assignment logic, they self-serve the queue.
-- The trust boundary is structural: untrusted agents physically cannot certify code.
+- The trust boundary is role-checked: an approval under a non-approver identity is rejected
+  (for correctly-identified clients — not defense against a forged identity; see Threat model).
 - Plans become first-class and observable (`status`/`next` see tasks), so `collab-loop`
   can advance a plan hands-off without a human kick.
 

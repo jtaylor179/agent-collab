@@ -25,9 +25,15 @@ Steps:
      cursor-sdk` and `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1`).
    - **Antigravity:** `antigravity-exec.sh` → `agy --print` (prompt-as-arg). Requires
      `agy` on PATH. Read-only by default (`ANTIGRAVITY_READONLY=1` → `--mode plan`).
-2. **Run it in the background** (long-running daemon). Report agent/project/root and how
-   to stop it.
-3. Optional: `COLLAB_WATCH_ARGS="--idle-exit"` to drain the queue then exit.
+2. **Set `COLLAB_WATCH_DETACH=1`** so the watcher daemonizes (double-fork + new session)
+   and OUTLIVES your shell. This is REQUIRED when you (an agent) launch it: otherwise the
+   watcher is a child of your transient per-turn shell and gets killed when the turn ends,
+   orphaning its claim every round (the classic "watcher keeps dying / stuck claim"
+   symptom). It prints `{"detached": true, "log": …}` and returns immediately; tail the
+   log to watch progress. Only skip detach for a foreground watcher in a terminal you keep
+   open.
+3. Report agent/project/root and how to stop it (`pkill -f "watch --project <project>"`).
+4. Optional: `COLLAB_WATCH_ARGS="--idle-exit"` to drain the queue then exit.
 4. Distinct ids: `copilot-1` / `codex-1` / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
 
 After launching, suggest `/collab-status <project>` or `log --follow`.
