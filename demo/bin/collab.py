@@ -74,12 +74,142 @@ RESULT_TYPES = ("review_request", "response", "proposal", "rebuttal")
 #   all        -> every approver must approve it
 #   final:<id> -> only approver <id>'s approval accepts it (a designated final reviewer)
 def _valid_policy(policy):
+    # Explicit non-string rejection FIRST, so a non-string (e.g. 7, null, an array/object
+    # from a profile's JSON) raises a clear CollabError rather than reaching a string method.
+    if not isinstance(policy, str):
+        raise CollabError(
+            f"accept-policy must be a string ('any'|'all'|'final:<agent-id>'), got "
+            f"{type(policy).__name__}.")
     if policy in ("any", "all"):
         return policy
-    if isinstance(policy, str) and policy.startswith("final:") and policy[6:].strip():
+    if policy.startswith("final:") and policy[6:].strip():
         return policy
     raise CollabError(
         f"invalid accept-policy '{policy}': use 'any', 'all', or 'final:<agent-id>'.")
+
+
+# --- setup-profile schema (v0.4.2) ----------------------------------------------
+# A profile is a versioned JSON OBJECT of REUSABLE wizard answers, stored plaintext in a
+# GLOBAL table. It must NOT hold anything sensitive or run-specific: no work-product/task/
+# plan PATHS, no secrets/tokens/env, no commands. Enforced by an allowlist of keys per mode
+# plus a recursive forbidden-key scan.
+PROFILE_SCHEMA_VERSION = 1
+_PROFILE_COMMON_KEYS = {"schema_version", "mode", "models", "onboarding", "access", "focus"}
+_PROFILE_MODE_KEYS = {
+    "review": {"reviewers", "roles"},
+    "orchestrated": {"workers", "approvers", "accept_policy"},
+}
+_PROFILE_ONBOARDING = {"detached", "print", "interactive"}
+_PROFILE_ROLE_VALUES = {"reviewer", "approver", "observer"}
+_PROFILE_ACCESS_VALUES = {"readonly", "edit"}
+# keys that must never appear ANYWHERE in a profile (paths / secrets / env / commands / the
+# per-run task or work-product data that belongs to the invocation, not the saved template).
+_PROFILE_FORBIDDEN_KEYS = {
+    "password", "passwd", "secret", "secrets", "token", "api_key", "apikey", "access_key",
+    "private_key", "credential", "credentials", "env", "environment", "exec", "command",
+    "cmd", "file", "filepath", "path", "tasks", "task", "task_list", "plan", "plan_path",
+    "work_product", "workproduct", "artifact_path", "body", "data_file",
+}
+
+
+def _validate_profile_data(data):
+    """Validate a parsed profile object against the versioned schema. Returns its mode.
+    Rejects non-objects, wrong/absent schema_version, bad mode, unknown top-level keys, a
+    bad onboarding/accept_policy, and any forbidden key (path/secret/env/command/task)
+    nested anywhere — profiles are plaintext global templates, not per-run data."""
+    if not isinstance(data, dict):
+        raise CollabError("a profile must be a JSON object.")
+    sv = data.get("schema_version")
+    # `type() is int` (not isinstance) so JSON `true` is rejected — bool is an int subclass
+    # and True == 1, which would otherwise sneak past the version check.
+    if type(sv) is not int or sv != PROFILE_SCHEMA_VERSION:
+        raise CollabError(
+            f"profile 'schema_version' must be the integer {PROFILE_SCHEMA_VERSION}.")
+    mode = data.get("mode")
+    # isinstance FIRST everywhere we test membership: an unhashable value ([] / {}) from the
+    # JSON would raise TypeError on `x in <set/dict>` before we could report a CollabError.
+    if not isinstance(mode, str) or mode not in _PROFILE_MODE_KEYS:
+        raise CollabError("profile 'mode' must be 'review' or 'orchestrated'.")
+    allowed = _PROFILE_COMMON_KEYS | _PROFILE_MODE_KEYS[mode]
+    extra = set(data) - allowed
+    if extra:
+        raise CollabError(
+            f"profile has key(s) not allowed for mode '{mode}': {sorted(extra)}. "
+            f"Allowed: {sorted(allowed)}.")
+    ob = data.get("onboarding")
+    if ob is not None and (not isinstance(ob, str) or ob not in _PROFILE_ONBOARDING):
+        raise CollabError(
+            f"profile 'onboarding' must be one of {sorted(_PROFILE_ONBOARDING)}.")
+    if "focus" in data and not isinstance(data["focus"], str):
+        raise CollabError("profile 'focus' must be a string.")
+
+    # Structural + enum validation of the VALUES (not just the keys): a malformed profile
+    # that parses must still be rejected so it can't crash or misdrive the wizard.
+    def _id_list(key, required):
+        v = data.get(key)
+        if v is None:
+            if required:
+                raise CollabError(
+                    f"a {mode} profile requires '{key}': a non-empty array of agent ids.")
+            return []
+        if not (isinstance(v, list) and v
+                and all(isinstance(x, str) and x.strip() for x in v)):
+            raise CollabError(f"profile '{key}' must be a non-empty array of agent ids.")
+        return v
+
+    def _str_map(key, values=None):
+        v = data.get(key)
+        if v is None:
+            return {}
+        if not isinstance(v, dict) or not all(isinstance(k, str) and k.strip() for k in v):
+            raise CollabError(f"profile '{key}' must be an object keyed by agent id.")
+        for k, val in v.items():
+            if values is not None:
+                # isinstance FIRST: an unhashable val ([] / {}) would raise TypeError on
+                # `val in values` before we could report a clean CollabError.
+                if not isinstance(val, str) or val not in values:
+                    raise CollabError(
+                        f"profile '{key}'['{k}'] must be one of {sorted(values)}.")
+            elif not (isinstance(val, str) and val.strip()):
+                raise CollabError(f"profile '{key}'['{k}'] must be a non-empty string.")
+        return v
+
+    # participants are ONLY the declared participant lists — NOT keys of roles/models/
+    # access (those must reference an already-declared participant, never introduce one).
+    if mode == "review":
+        participants = set(_id_list("reviewers", required=True))
+    else:  # orchestrated
+        approvers = _id_list("approvers", required=True)
+        participants = set(_id_list("workers", required=True)) | set(approvers)
+        if "accept_policy" in data:
+            pol = _valid_policy(data["accept_policy"])
+            if pol.startswith("final:") and pol[6:].strip() not in approvers:
+                raise CollabError(
+                    f"profile accept_policy '{pol}' must name one of the profile's "
+                    f"approvers {sorted(approvers)}.")
+    # roles/models/access: valid enums AND every id must be a DECLARED participant.
+    for key, values in (("roles", _PROFILE_ROLE_VALUES), ("models", None),
+                        ("access", _PROFILE_ACCESS_VALUES)):
+        stray = set(_str_map(key, values)) - participants
+        if stray:
+            raise CollabError(
+                f"profile '{key}' references non-participant id(s): {sorted(stray)}.")
+
+    def scan(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if str(k).lower() in _PROFILE_FORBIDDEN_KEYS:
+                    raise CollabError(
+                        f"profile must not contain a '{k}' field — profiles are plaintext "
+                        "global templates and must not hold paths (work product / tasks / "
+                        "plan), secrets/tokens/env, or commands.")
+                scan(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                scan(v)
+    scan(data)
+    return mode
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -121,6 +251,15 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 CREATE INDEX IF NOT EXISTS idx_inbox ON inbox(recipient, status);
 CREATE INDEX IF NOT EXISTS idx_msg_seq ON messages(project, seq);
+-- Saved setup profiles (GLOBAL, per-root — not tied to a project): a named JSON blob
+-- capturing the reusable wizard answers (mode, participants+roles, models, accept-policy,
+-- onboarding, focus — never the work-product path) so a bare `agent-collab` can offer
+-- "use last / pick from list". The bus stores/retrieves opaque JSON; the wizard owns its shape.
+CREATE TABLE IF NOT EXISTS profiles (
+  name TEXT PRIMARY KEY,
+  data TEXT,
+  created_at TEXT, updated_at TEXT, last_used_at TEXT
+);
 """
 
 
@@ -1526,6 +1665,67 @@ class Store:
             self.conn.execute("DELETE FROM projects WHERE name=?", (project,))
         return {"deleted": project}
 
+    # -- setup profiles (global named JSON blobs) ---------------------------------
+    def save_profile(self, name, data):
+        """Save (or overwrite) a named setup profile. `data` is a JSON object validated
+        against the versioned profile schema (mode + allowed keys, no paths/secrets/tasks).
+        Saving marks it last-used, so it's what `use last` offers next time."""
+        name = (name or "").strip()
+        if not name:
+            raise CollabError("a profile needs a non-empty --name.")
+        try:
+            parsed = json.loads(data)
+        except (ValueError, TypeError) as e:
+            raise CollabError(f"profile --data must be valid JSON: {e}")
+        _validate_profile_data(parsed)
+        data = json.dumps(parsed)   # store normalized JSON
+        ts = now_iso()
+        with self.write_tx():
+            self.conn.execute(
+                "INSERT INTO profiles(name,data,created_at,updated_at,last_used_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                "data=excluded.data, updated_at=excluded.updated_at, "
+                "last_used_at=excluded.last_used_at",
+                (name, data, ts, ts, ts),
+            )
+        return {"saved": name, "updated_at": ts}
+
+    def list_profiles(self):
+        """All saved profiles, most-recently-used FIRST (so [0] is the `use last` default).
+        Returns lightweight rows (no data blob) for the picker."""
+        rows = self.conn.execute(
+            "SELECT name, created_at, updated_at, last_used_at FROM profiles "
+            "ORDER BY last_used_at DESC, name"
+        ).fetchall()
+        return {"count": len(rows), "profiles": [dict(r) for r in rows]}
+
+    def get_profile(self, name, use=False):
+        """Fetch a profile (with its parsed `data`). `use=True` stamps last_used_at so it
+        becomes the `use last` default — call it when a profile is actually reused to start
+        a project."""
+        row = self.conn.execute(
+            "SELECT * FROM profiles WHERE name=?", (name,)).fetchone()
+        if not row:
+            raise CollabError(f"no such profile: '{name}'")
+        out = dict(row)
+        out["data"] = json.loads(row["data"]) if row["data"] else None
+        if use:
+            ts = now_iso()
+            with self.write_tx():
+                self.conn.execute(
+                    "UPDATE profiles SET last_used_at=? WHERE name=?", (ts, name))
+            out["last_used_at"] = ts   # return the value we just wrote, not the stale one
+        return out
+
+    def delete_profile(self, name):
+        row = self.conn.execute(
+            "SELECT 1 FROM profiles WHERE name=?", (name,)).fetchone()
+        if not row:
+            raise CollabError(f"no such profile: '{name}'")
+        with self.write_tx():
+            self.conn.execute("DELETE FROM profiles WHERE name=?", (name,))
+        return {"deleted_profile": name}
+
     def doctor(self, project, agent):
         """Diagnose setup and tell the caller what to do next. Designed so a skill can
         relay the `hints` to the user in plain language. Never raises on a missing
@@ -1976,6 +2176,22 @@ def build_parser():
     ag.add_argument("--version", type=int)
     ag.add_argument("--out", help="write content to this path instead of stdout")
 
+    s = sub.add_parser("profile", help="save/list/show/delete reusable setup profiles")
+    psub = s.add_subparsers(dest="pcmd", required=True)
+    pp = psub.add_parser("save", help="save a profile (JSON via --data, --data-file, or -)")
+    pp.add_argument("--name", required=True)
+    pg = pp.add_mutually_exclusive_group(required=True)
+    pg.add_argument("--data", help="profile JSON inline")
+    pg.add_argument("--data-file", help="read profile JSON from a file, or '-' for stdin")
+    psub.add_parser("list", help="list saved profiles (most-recently-used first)")
+    pg = psub.add_parser("show", help="print a profile's JSON")
+    pg.add_argument("--name", required=True)
+    pg.add_argument("--use", action="store_true",
+                    help="also mark it last-used (when reusing it to start a project)")
+    pd = psub.add_parser("delete", help="delete a profile")
+    pd.add_argument("--name", required=True)
+    pd.add_argument("--yes", action="store_true", help="confirm deletion")
+
     s = sub.add_parser("decide", help="post binding decision, converge project")
     s.add_argument("--project", required=True)
     s.add_argument("--force", action="store_true",
@@ -2220,6 +2436,28 @@ def main(argv=None):
                            "sha256": row["sha256"], "out": args.out})
                 else:
                     sys.stdout.write(data.decode("utf-8", errors="replace"))
+        elif cmd == "profile":
+            if args.pcmd == "save":
+                if args.data is not None:
+                    data = args.data
+                elif args.data_file == "-":
+                    data = sys.stdin.read()
+                elif args.data_file:
+                    with open(args.data_file, "r", encoding="utf-8") as fh:
+                        data = fh.read()
+                else:
+                    raise CollabError("profile save needs --data, --data-file, or "
+                                      "--data-file - (stdin)")
+                _emit(store.save_profile(args.name, data))
+            elif args.pcmd == "list":
+                _emit(store.list_profiles())
+            elif args.pcmd == "show":
+                _emit(store.get_profile(args.name, use=args.use))
+            elif args.pcmd == "delete":
+                if not args.yes:
+                    raise CollabError(
+                        f"refusing to delete profile '{args.name}' without --yes")
+                _emit(store.delete_profile(args.name))
         elif cmd == "decide":
             _emit(store.decide(args.project, args.from_agent, _read_body(args),
                                thread_id=args.thread_id, parent=args.parent,

@@ -14,7 +14,8 @@ import threading
 import time
 import unittest
 
-from collab import Store, CollabError, watch, _bind_payload, _agent_payload
+from collab import (Store, CollabError, watch, _bind_payload, _agent_payload,
+                    _validate_profile_data, main)
 
 FAKE_AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 
@@ -1714,3 +1715,243 @@ class TestCodexReviewFixes(Base):
         self.assertIsNone(s.claim("P", "wB"))             # sibling preempted
         s.release("P", "wA", cA["claim_message_id"], cA["claim_token"])
         self.assertIsNotNone(s.claim("P", "wB"))          # pool reopened to wB
+
+
+
+def _prof(mode="review", **kw):
+    """A VALID minimal profile for `mode`; kw overrides/extends (may make it invalid on
+    purpose for negative tests)."""
+    d = {"schema_version": 1, "mode": mode}
+    if mode == "review":
+        d["reviewers"] = ["codex-1"]
+    elif mode == "orchestrated":
+        d["workers"] = ["codex-1"]
+        d["approvers"] = ["claude-1"]
+    d.update(kw)
+    return json.dumps(d)
+
+
+class TestProfiles(Base):
+    """v0.4.2: global named setup profiles (validated JSON objects) so a bare
+    `agent-collab` can offer use-last / pick-from-list."""
+
+    # --- Store-level ------------------------------------------------------------
+    def test_save_get_roundtrip(self):
+        s = self.s
+        s.save_profile("team", _prof("orchestrated", accept_policy="final:claude-1",
+                                     workers=["codex-1"], approvers=["claude-1"]))
+        p = s.get_profile("team")
+        self.assertEqual(p["data"]["mode"], "orchestrated")
+        self.assertEqual(p["data"]["accept_policy"], "final:claude-1")
+
+    def test_save_overwrites(self):
+        s = self.s
+        s.save_profile("t", _prof(focus="a"))
+        s.save_profile("t", _prof(focus="b"))
+        self.assertEqual(s.get_profile("t")["data"]["focus"], "b")
+        self.assertEqual(s.list_profiles()["count"], 1)
+
+    def test_list_most_recently_used_first(self):
+        s = self.s
+        s.save_profile("a", _prof())
+        s.save_profile("b", _prof())
+        self.assertEqual([p["name"] for p in s.list_profiles()["profiles"]], ["b", "a"])
+        s.get_profile("a", use=True)
+        self.assertEqual([p["name"] for p in s.list_profiles()["profiles"]], ["a", "b"])
+
+    def test_use_returns_fresh_last_used(self):
+        s = self.s
+        s.save_profile("p", _prof())
+        before = s.get_profile("p")["last_used_at"]
+        got = s.get_profile("p", use=True)
+        # the returned last_used_at is the value just written, not the stale pre-update one
+        self.assertEqual(got["last_used_at"], s.get_profile("p")["last_used_at"])
+        self.assertGreaterEqual(got["last_used_at"], before)
+
+    def test_name_is_normalized(self):
+        s = self.s
+        s.save_profile("  team  ", _prof())
+        self.assertEqual(s.get_profile("team")["name"], "team")  # stored trimmed
+        self.assertEqual(s.list_profiles()["count"], 1)
+
+    def test_delete(self):
+        s = self.s
+        s.save_profile("gone", _prof())
+        self.assertEqual(s.delete_profile("gone")["deleted_profile"], "gone")
+        self.assertEqual(s.list_profiles()["count"], 0)
+
+    def test_get_and_delete_missing(self):
+        s = self.s
+        with self.assertRaises(CollabError):
+            s.get_profile("nope")
+        with self.assertRaises(CollabError):
+            s.delete_profile("nope")
+
+    def test_profiles_global_across_connections(self):
+        self.s.save_profile("shared", _prof(focus="x"))
+        self.assertEqual(self.fresh_store().get_profile("shared")["data"]["focus"], "x")
+
+    def test_existing_db_gains_profiles_table(self):
+        # opening a second Store on the same root initializes the profiles table
+        cols = [r["name"] for r in self.fresh_store().conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        self.assertIn("profiles", cols)
+
+    # --- schema validation ------------------------------------------------------
+    def test_invalid_json_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("bad", "not json")
+
+    def test_non_object_rejected(self):
+        for bad in ('[]', '42', '"x"', 'null'):
+            with self.assertRaises(CollabError):
+                self.s.save_profile("b", bad)
+
+    def test_schema_version_required(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", json.dumps({"mode": "review"}))
+
+    def test_schema_version_must_be_int_not_bool(self):
+        # True == 1 in Python, so a JSON boolean must be rejected as schema_version
+        for sv in (True, 1.0, "1"):
+            with self.assertRaises(CollabError):
+                self.s.save_profile("p", json.dumps(
+                    {"schema_version": sv, "mode": "review", "reviewers": ["codex-1"]}))
+
+    def test_bad_mode_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", json.dumps({"schema_version": 1, "mode": "nope"}))
+
+    def test_unknown_key_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(bogus="x"))
+
+    def test_forbidden_keys_rejected(self):
+        # paths / tasks / secrets / commands must never be stored, even nested
+        for bad in (_prof(tasks=["a"]), _prof(models={"token": "sk-123"}),
+                    _prof(path="/etc/x"), _prof(roles={"exec": "rm -rf"})):
+            with self.assertRaises(CollabError):
+                self.s.save_profile("p", bad)
+
+    def test_empty_name_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("   ", _prof())
+
+    def test_bad_onboarding_and_policy_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(onboarding="teleport"))
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof("orchestrated", accept_policy="bogus"))
+
+    # structural / type / enum validation (round-2 fixes)
+    def test_sparse_profile_missing_participants_rejected(self):
+        with self.assertRaises(CollabError):              # review, no reviewers
+            self.s.save_profile("p", json.dumps({"schema_version": 1, "mode": "review"}))
+        with self.assertRaises(CollabError):              # orchestrated, no workers/approvers
+            self.s.save_profile("p", json.dumps(
+                {"schema_version": 1, "mode": "orchestrated"}))
+
+    def test_scalar_participant_lists_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(reviewers="codex-1"))     # not a list
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(reviewers=[]))            # empty
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(reviewers=[123]))         # not id strings
+
+    def test_role_and_access_enums_and_maps_validated(self):
+        with self.assertRaises(CollabError):                          # bad role value
+            self.s.save_profile("p", _prof(roles={"codex-1": "boss"}))
+        with self.assertRaises(CollabError):                          # bad access value
+            self.s.save_profile("p", _prof(access={"codex-1": "sudo"}))
+        with self.assertRaises(CollabError):                          # models not a map
+            self.s.save_profile("p", _prof(models=["gpt"]))
+        # valid enums/maps for declared participants pass
+        self.s.save_profile("ok", _prof(roles={"codex-1": "approver"},
+                                        access={"codex-1": "readonly"},
+                                        models={"codex-1": "o1"}))
+
+    def test_non_participant_reference_rejected(self):
+        with self.assertRaises(CollabError):     # models references an undeclared id
+            self.s.save_profile("p", _prof(models={"stranger-9": "gpt"}))
+        with self.assertRaises(CollabError):     # access references an undeclared id
+            self.s.save_profile("p", _prof(access={"stranger-9": "edit"}))
+
+    def test_stray_role_id_rejected(self):
+        # a roles key must be a DECLARED participant, not self-declare one
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof(reviewers=["codex-1"],
+                                           roles={"intruder": "approver"}))
+
+    def test_unhashable_enum_values_rejected(self):
+        # unhashable values ([] / {}) in enum maps/fields must raise CollabError, not
+        # TypeError from `val in <set>`
+        for bad in (_prof(roles={"codex-1": []}), _prof(access={"codex-1": {}}),
+                    _prof(mode=[]), _prof(onboarding={})):
+            with self.assertRaises(CollabError):
+                self.s.save_profile("p", bad)
+
+    def test_non_string_accept_policy_rejected(self):
+        # numeric/null/array/object policy must raise CollabError, not Type/AttributeError
+        for pol in (7, None, [1], {"a": 1}):
+            with self.assertRaises(CollabError):
+                self.s.save_profile("p", json.dumps(
+                    {"schema_version": 1, "mode": "orchestrated", "workers": ["w1"],
+                     "approvers": ["a1"], "accept_policy": pol}))
+
+    def test_final_policy_must_name_a_profile_approver(self):
+        with self.assertRaises(CollabError):     # final:<id> not in approvers
+            self.s.save_profile("p", _prof("orchestrated", workers=["w1"],
+                                           approvers=["claude-1"],
+                                           accept_policy="final:ghost"))
+        # final naming an actual approver passes
+        self.s.save_profile("ok", _prof("orchestrated", workers=["w1"],
+                                        approvers=["claude-1"],
+                                        accept_policy="final:claude-1"))
+
+    # --- CLI-level --------------------------------------------------------------
+    def _cli(self, *args, stdin=None):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        old = sys.stdin
+        if stdin is not None:
+            sys.stdin = io.StringIO(stdin)
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main(["--root", self.tmp, *args])
+        finally:
+            sys.stdin = old
+        return rc, buf.getvalue()
+
+    def test_cli_inline_file_stdin(self):
+        import os
+        rc, _ = self._cli("profile", "save", "--name", "inl", "--data", _prof())
+        self.assertEqual(rc, 0)
+        path = os.path.join(self.tmp, "p.json")
+        with open(path, "w") as fh:
+            fh.write(_prof(focus="file"))
+        rc, _ = self._cli("profile", "save", "--name", "fil", "--data-file", path)
+        self.assertEqual(rc, 0)
+        rc, _ = self._cli("profile", "save", "--name", "std", "--data-file", "-",
+                          stdin=_prof(focus="stdin"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.s.get_profile("std")["data"]["focus"], "stdin")
+
+    def test_cli_conflicting_inputs_rejected(self):
+        # --data and --data-file are mutually exclusive (argparse errors -> SystemExit)
+        with self.assertRaises(SystemExit):
+            self._cli("profile", "save", "--name", "x", "--data", _prof(),
+                      "--data-file", "-")
+
+    def test_cli_show_use_and_delete_guard(self):
+        self._cli("profile", "save", "--name", "p", "--data", _prof())
+        rc, out = self._cli("profile", "show", "--name", "p", "--use")
+        self.assertEqual(rc, 0)
+        self.assertIn('"data"', out)
+        # delete without --yes fails; with --yes succeeds
+        rc, _ = self._cli("profile", "delete", "--name", "p")
+        self.assertEqual(rc, 1)
+        rc, _ = self._cli("profile", "delete", "--name", "p", "--yes")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.s.list_profiles()["count"], 0)

@@ -100,6 +100,8 @@ delete   --project X --yes
 watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
 reclaim  --project X [--agent <id>] [--message <id>] [--force]         # recover a dead watcher's stranded claim
 policy   --project X [--set any|all|final:<agent-id>]                  # show/set task acceptance policy
+profile  save --name X (--data <json> | --data-file <f|->)            # save a reusable setup profile (global)
+profile  list | show --name X [--use] | delete --name X --yes         # reuse: `show --use` marks it last-used
 ```
 
 Orchestrated-plan verbs: `start --role orchestrator [--accept-policy any|all|final:<id>]`,
@@ -201,8 +203,50 @@ Ask in grouped rounds, not a serial interrogation. In Claude Code, use the
 `AskUserQuestion` tool (one call per round, up to 4 questions; `multiSelect` where
 noted). In harnesses without such a tool, ask the same rounds as compact chat messages.
 
+**Round −1 — saved profiles (check FIRST).** Before anything else, run `profile list`. If
+it returns any profiles, offer three choices (list newest-first — `profiles[0]` is the
+last used):
+- **Use last (`<profiles[0].name>`)** — reuse it; run `profile show --name <name> --use`
+  (the `--use` stamps it as last-used) and read its JSON.
+- **Pick from list** — show the names, let them choose, then `profile show --name <chosen>
+  --use`.
+- **Start fresh** — fall through to Round 0.
+
+When a profile is reused, SKIP every question it already answers (mode, participants +
+roles, models, access, accept-policy, onboarding) and ask ONLY for the **per-run input**,
+which DIFFERS BY MODE — the profile never stores it:
+- **review** → the **work-product path** + (if not in the profile) the review focus.
+- **orchestrated** → the **task list or a plan-file path** to split into tasks. (Tasks are
+  per-run, never stored in the profile.)
+Confirm the derived project name, then run the matching wizard's "execute" steps with the
+profile's values. **If the profile grants edit-capable access, confirm it before applying**
+— re-confirm edit access to a new repo rather than silently reusing it.
+
+A profile is a versioned JSON **object**; the bus validates its structure (`profile save`
+rejects non-objects, unknown keys, wrong value types, bad enums, ids that reference a
+non-participant, and any path/task/secret/token/env/command field). Keys:
+- **required (all):** `"schema_version": 1`, `"mode"` (`"review"` | `"orchestrated"`).
+- **required participants** — **review:** `"reviewers"` (non-empty `[ids]`); **orchestrated:**
+  `"workers"` and `"approvers"` (both non-empty `[ids]`). A profile is never so sparse that
+  it has no participants.
+- **optional (absent → wizard default, don't re-ask on reuse):** `"models"` (`{agent: model}`),
+  `"access"` (`{agent: "readonly"|"edit"}`, default readonly), `"onboarding"`
+  (`"detached"|"print"|"interactive"`), `"focus"`; **review** also `"roles"`
+  (`{agent: "reviewer"|"approver"|"observer"}`); **orchestrated** also `"accept_policy"`
+  (`"any"|"all"|"final:<id>"`, default `any`). Every id in `models`/`access`/`roles` must be
+  a declared participant.
+
+Examples — orchestrated:
+`{"schema_version":1,"mode":"orchestrated","workers":["codex-1","copilot-1"],`
+`"approvers":["claude-1"],"accept_policy":"final:claude-1","models":{"copilot-1":"gpt-5.4"},`
+`"onboarding":"detached","focus":"correctness"}` · review:
+`{"schema_version":1,"mode":"review","reviewers":["codex-1","copilot-1"],`
+`"roles":{"copilot-1":"approver"},"onboarding":"detached","focus":"security"}`.
+Profiles are plaintext global data — NEVER put work-product/task/plan paths, secrets,
+tokens, or commands in them (the bus rejects those fields).
+
 **Round 0 — collaboration mode.** Ask which shape the collaboration is (skip only if the
-request already makes it obvious):
+request already makes it obvious, or a reused profile already set it):
 
 - **Review** (default) — ONE work product; reviewers critique it and the initiator
   converges. This is the review wizard below.
@@ -316,6 +360,12 @@ review mode; ask only if the user wants non-defaults.)
 5. Hand off to the orchestrator loop: run `/collab-orchestrate <name>` (or drive it
    manually with `next --agent <name>` → `broadcast|wait|reclaim|decide|done`). Offer to
    start it now or let the user come back later.
+
+**After a FRESH setup (either wizard), offer to save it as a profile.** If they say yes,
+ask for a short name and run `profile save --name <name> --data '<json>'` with the reusable
+answers (mode, participants + roles, models, access, accept-policy, onboarding, focus — NOT
+the work-product path). Next bare invocation, Round −1 will offer it as "use last / pick
+from list". Don't offer to save when a profile was reused unchanged.
 
 ## Intent → action
 

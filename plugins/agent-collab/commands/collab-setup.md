@@ -6,8 +6,15 @@ The user wants a guided, interactive setup of a collaboration project. Use the
 `agent-collab` skill and follow its **"Interactive setup wizard (bare invocation)"**
 section exactly.
 
+**Round −1 — saved profiles.** FIRST run `profile list`. If any exist, offer "use last
+(`<newest>`) / pick from list / start fresh" (newest-first; `profiles[0]` is last used).
+On reuse, `profile show --name <name> --use` and read its JSON, then SKIP every question it
+answers (mode, roles, models, accept-policy, onboarding) — ask only for the work product.
+After a FRESH setup, offer to `profile save --name <name> --data '<json>'` the reusable
+answers (never the work-product path). See the skill's "Round −1" for details.
+
 **Round 0 — mode.** First ask which shape the collaboration is (skip only if obvious
-from the request):
+from the request, or a reused profile already set it):
 - **Review** (default) — one work product, reviewers critique → follow "Wizard A: review"
   (the steps below).
 - **Orchestrated plan** — many interchangeable workers pull tasks from a shared queue,
