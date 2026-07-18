@@ -1038,3 +1038,173 @@ class TestPayloadBinding(Base):
         argv, stdin_text = _bind_payload(["tool", "--prompt={}"], "HELLO")
         self.assertEqual(argv, ["tool", "--prompt=HELLO"])
         self.assertIsNone(stdin_text)
+
+
+EXPIRED = "2000-01-01T00:00:00.000000Z"
+
+
+class TestInFlightAndReclaim(Base):
+    """A watcher that claims a review then dies mid-run leaves the inbox row stuck in
+    'claimed'. It is invisible to poll/inbox (which show only 'pending'), so status must
+    surface it and reclaim must recover it without waiting out the lease."""
+
+    def _claimed(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "rev", round_=1)
+        c = s.claim("A", "codex-1")
+        return s, c
+
+    def test_status_surfaces_in_flight_claim(self):
+        s, c = self._claimed()
+        st = s.status("A")
+        # poll/pending see nothing — the row is 'claimed', not 'pending'
+        self.assertEqual(st["pending"], {})
+        self.assertEqual(len(st["in_flight"]), 1)
+        row = st["in_flight"][0]
+        self.assertEqual(row["message_id"], c["claim_message_id"])
+        self.assertEqual(row["recipient"], "codex-1")
+        self.assertFalse(row["orphaned"])  # lease still live
+
+    def test_orphaned_flag_set_when_lease_expired(self):
+        s, c = self._claimed()
+        s.conn.execute("UPDATE inbox SET leased_until=? WHERE recipient='codex-1'",
+                       (EXPIRED,))
+        row = s.status("A")["in_flight"][0]
+        self.assertTrue(row["orphaned"])
+        # doctor tells the human it's abandoned and how to recover it
+        doc = s.doctor("A", "codex-1")
+        self.assertEqual(len(doc["in_flight_for_you"]), 1)
+        self.assertTrue(any("reclaim" in h for h in doc["hints"]))
+
+    def test_reclaim_only_expired_by_default(self):
+        s, c = self._claimed()
+        # live lease is NOT reclaimed without --force
+        self.assertEqual(s.reclaim("A")["reclaimed"], 0)
+        s.conn.execute("UPDATE inbox SET leased_until=? WHERE recipient='codex-1'",
+                       (EXPIRED,))
+        res = s.reclaim("A")
+        self.assertEqual(res["reclaimed"], 1)
+        self.assertEqual(res["message_ids"], [c["claim_message_id"]])
+        # back to pending -> a fresh watcher/claim can pick it up
+        self.assertEqual(len(s.poll("A", "codex-1")), 1)
+        self.assertEqual(s.status("A")["in_flight"], [])
+
+    def test_reclaim_force_recovers_live_lease(self):
+        s, c = self._claimed()
+        res = s.reclaim("A", force=True)  # watcher known dead; don't wait the lease
+        self.assertEqual(res["reclaimed"], 1)
+        self.assertTrue(res["forced"])
+        self.assertEqual(len(s.poll("A", "codex-1")), 1)
+
+    def test_reclaim_scoped_by_agent(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.join("A", "copilot-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "r1", round_=1)
+        s.post("A", "claude-1", "copilot-1", "review_request", "r2", round_=1)
+        s.claim("A", "codex-1")
+        s.claim("A", "copilot-1")
+        res = s.reclaim("A", agent="codex-1", force=True)
+        self.assertEqual(res["reclaimed"], 1)
+        # only codex-1's row came back; copilot-1's is still in flight
+        self.assertEqual(len(s.poll("A", "codex-1")), 1)
+        self.assertEqual(len(s.poll("A", "copilot-1")), 0)
+
+    def test_reclaimed_row_fences_out_the_dead_worker(self):
+        """The whole point of the token: if the 'dead' watcher was only wedged and
+        wakes up, its complete() on the reclaimed row must be rejected, not double-post."""
+        s, c1 = self._claimed()
+        s.reclaim("A", force=True)
+        c2 = s.claim("A", "codex-1")  # fresh watcher reclaims with a new token
+        self.assertNotEqual(c1["claim_token"], c2["claim_token"])
+        with self.assertRaises(CollabError):
+            s.complete("A", "codex-1", c1["claim_message_id"], c1["claim_token"],
+                       "response", "stale work from a woken zombie", round_=1)
+        # the live owner still completes normally
+        ok = s.complete("A", "codex-1", c2["claim_message_id"], c2["claim_token"],
+                        "response", "fresh work", round_=1)
+        self.assertFalse(ok["duplicate"])
+
+
+class TestNextAction(Base):
+    """`next` collapses the board into ONE recommended action so a self-paced loop
+    advances a multi-step plan hands-off instead of needing a human to re-kick it."""
+
+    def _setup(self, reviewers=("codex-1",)):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        for r in reviewers:
+            s.join("A", r)
+        a = s.put_artifact("A", "spec.md", b"v1", "claude-1")
+        s.post("A", "claude-1", "broadcast", "review_request", "review v1",
+               round_=1, refs={"artifact": a["artifact"]})
+        return s
+
+    def test_broadcast_when_no_request_sent(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        self.assertEqual(s.next_action("A", "claude-1")["action"], "broadcast")
+
+    def test_wait_while_reviewer_outstanding(self):
+        s = self._setup(("codex-1", "copilot-1"))
+        # only codex has replied; still waiting on copilot
+        c = s.claim("A", "codex-1")
+        s.complete("A", "codex-1", c["claim_message_id"], c["claim_token"],
+                   "response", "codex: ok", round_=1)
+        s.inbox_drain("A", "claude-1")  # handle codex's reply so drain doesn't mask wait
+        nx = s.next_action("A", "claude-1")
+        self.assertEqual(nx["action"], "wait")
+        self.assertEqual(nx["responded"], ["codex-1"])
+        self.assertEqual([a["agent"] for a in nx["awaiting"]], ["copilot-1"])
+
+    def test_decide_when_all_reviewers_in(self):
+        s = self._setup(("codex-1",))
+        c = s.claim("A", "codex-1")
+        s.complete("A", "codex-1", c["claim_message_id"], c["claim_token"],
+                   "response", "codex: ok", round_=1)
+        # initiator drained the reply, now all reviewers are in -> decide
+        s.inbox_drain("A", "claude-1")
+        nx = s.next_action("A", "claude-1")
+        self.assertEqual(nx["action"], "decide")
+        self.assertEqual(nx["responded"], ["codex-1"])
+
+    def test_drain_takes_priority_over_decide(self):
+        s = self._setup(("codex-1",))
+        c = s.claim("A", "codex-1")
+        s.complete("A", "codex-1", c["claim_message_id"], c["claim_token"],
+                   "response", "codex: ok", round_=1)
+        # the response is sitting in claude-1's inbox unhandled
+        nx = s.next_action("A", "claude-1")
+        self.assertEqual(nx["action"], "drain")
+        self.assertEqual(nx["pending_for_you"], 1)
+
+    def test_reclaim_takes_priority_when_orphaned(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "rev", round_=1)
+        c = s.claim("A", "codex-1")  # codex's watcher claims, then "dies"
+        s.conn.execute("UPDATE inbox SET leased_until='2000-01-01T00:00:00.000000Z' "
+                       "WHERE recipient='codex-1'")
+        nx = s.next_action("A", "codex-1")
+        self.assertEqual(nx["action"], "reclaim")
+        self.assertEqual(nx["orphaned_for_you"], [c["claim_message_id"]])
+
+    def test_done_when_converged(self):
+        s = self._setup(("codex-1",))
+        s.inbox_drain("A", "codex-1")
+        s.decide("A", "claude-1", "ship it")
+        self.assertEqual(s.next_action("A", "claude-1")["action"], "done")
+
+    def test_offline_reviewer_flagged_in_why(self):
+        s = self._setup(("codex-1",))
+        # force codex's heartbeat far into the past -> offline
+        s.conn.execute("UPDATE participants SET last_heartbeat='2000-01-01T00:00:00.000000Z' "
+                       "WHERE agent_id='codex-1'")
+        nx = s.next_action("A", "claude-1")
+        self.assertEqual(nx["action"], "wait")
+        self.assertIn("offline", nx["why"])

@@ -549,6 +549,74 @@ class Store:
             )
             return cur.rowcount
 
+    def in_flight(self, project, agent=None):
+        """List claimed (in-flight) inbox rows for the project — work a watcher has
+        picked up but not yet completed. An orphaned row (lease already expired) means
+        the owning watcher almost certainly died mid-run: it is invisible to poll/inbox
+        (which only show 'pending') and will not move until the next claim triggers a
+        sweep. Surfacing it here is how a human sees an abandoned review instead of a
+        misleading empty 'pending'."""
+        now = now_iso()
+        rows = self.conn.execute(
+            "SELECT i.recipient, i.message_id, m.type, i.deliveries, i.leased_until, "
+            "m.thread_id FROM inbox i JOIN messages m USING(message_id) "
+            "WHERE m.project=? AND i.status='claimed'"
+            + (" AND i.recipient=?" if agent else "")
+            + " ORDER BY m.seq",
+            (project, agent) if agent else (project,),
+        ).fetchall()
+        return [
+            {"recipient": r["recipient"], "message_id": r["message_id"],
+             "type": r["type"], "deliveries": r["deliveries"],
+             "leased_until": r["leased_until"], "thread_id": r["thread_id"],
+             # a NULL lease can't expire; only a set-and-past lease is orphaned
+             "orphaned": bool(r["leased_until"] and r["leased_until"] < now)}
+            for r in rows
+        ]
+
+    def reclaim(self, project, message_id=None, agent=None, force=False):
+        """Human-facing recovery for a dead watcher's stranded claims: return claimed
+        inbox rows to pending so a fresh watcher can pick them up immediately, without
+        waiting out the remaining lease.
+
+        Default (no --force) reclaims only EXPIRED leases — same safety as the inline
+        sweeper, but reportable and scopeable. --force reclaims even a still-live lease
+        (use when you KNOW the watcher is dead and don't want to wait). Scope with
+        --message (one row) or --agent (one recipient's rows).
+
+        Safe against a prior owner that turns out to be alive: reclaim mints no token,
+        it just nulls the row's claim_token, so the old worker's later complete()/ack()
+        is fenced out by _verify_lease (token mismatch) and skipped, exactly as with a
+        normal sweep."""
+        self.get_project(project)
+        where = ["status='claimed'",
+                 "message_id IN (SELECT message_id FROM messages WHERE project=?)"]
+        params = [project]
+        if message_id:
+            where.append("message_id=?")
+            params.append(message_id)
+        if agent:
+            where.append("claimed_by=?")
+            params.append(agent)
+        if not force:
+            where.append("leased_until IS NOT NULL AND leased_until < ?")
+            params.append(now_iso())
+        with self.write_tx():
+            targets = [
+                r["message_id"] for r in self.conn.execute(
+                    "SELECT message_id FROM inbox WHERE " + " AND ".join(where),
+                    params,
+                ).fetchall()
+            ]
+            if targets:
+                ph = ",".join("?" * len(targets))
+                self.conn.execute(
+                    "UPDATE inbox SET status='pending', claimed_by=NULL, "
+                    f"claim_token=NULL, leased_until=NULL WHERE message_id IN ({ph})",
+                    targets,
+                )
+        return {"reclaimed": len(targets), "message_ids": targets, "forced": force}
+
     def claim(self, project, agent, lease_min=DEFAULT_LEASE_MIN, wait=0.0,
               poll_interval=2.0):
         """Claim the next pending inbox row for agent. If wait>0, block up to `wait`
@@ -814,6 +882,10 @@ class Store:
                 )) for r in parts
             ],
             "pending": {r["recipient"]: r["n"] for r in pending},
+            # claimed-but-not-completed rows. An 'orphaned' entry (lease expired) is a
+            # review a watcher picked up then abandoned — it is NOT in 'pending', so
+            # without this it would be invisible (an empty 'pending' hiding real work).
+            "in_flight": self.in_flight(project),
             "stalled": [
                 {"recipient": r["recipient"], "message_id": r["message_id"],
                  "type": r["type"], "deliveries": r["deliveries"]} for r in stalled
@@ -822,6 +894,97 @@ class Store:
             # {} when the project has no approvers; otherwise agent -> approved?
             "approvals": self._approval_status(project),
         }
+
+    def next_action(self, project, agent):
+        """The deterministic 'what should I do next?' signal for a self-paced loop.
+
+        `status` dumps raw thread IDs — a loop tick can't act on that, so a human ends
+        up interpreting it and re-kicking the loop by hand ('had to run /loop continue to
+        fish all the steps'). This collapses the whole board into ONE recommended action
+        for `agent`, so a loop can advance a multi-step plan hands-off:
+
+          reclaim  - a review claimed for you was abandoned (dead watcher); recover it
+          drain    - you have inbox messages to claim + handle
+          decide   - every reviewer has answered your latest review_request; converge
+                     (or rebut) — the ball is in your court
+          wait     - you're waiting on reviewer(s); nothing for you to do yet
+          done     - project converged; advance to the next plan step
+          broadcast- you're the initiator but no review_request has gone out yet
+
+        `open_threads` in status is NOT used here: `decide` converges a whole project at
+        once, so open-thread count is noisy by design and a poor 'am I blocked' signal.
+        The real question — is the ball in my court or a reviewer's — is answered from the
+        inbox and per-reviewer response coverage of the latest review round."""
+        p = self.get_project(project)
+        parts = self.participants(project)
+        mine = next((r for r in parts if r["agent_id"] == agent), None)
+        role = mine["role"] if mine else None
+        reviewers = [r["agent_id"] for r in parts
+                     if r["role"] in FANOUT_ROLES and r["agent_id"] != agent]
+        out = {
+            "project": project, "agent": agent, "your_role": role,
+            "state": p["state"], "reviewers": reviewers,
+            "pending_for_you": len(self.poll(project, agent)) if agent else 0,
+            "orphaned_for_you": [f["message_id"] for f in self.in_flight(project, agent)
+                                 if f["orphaned"]],
+            "latest_review_request": None, "responded": [], "awaiting": [],
+        }
+
+        def result(action, why):
+            out["action"] = action
+            out["why"] = why
+            return out
+
+        if p["state"] == "converged":
+            return result("done", "Project converged — advance to the next plan step "
+                                  "(start/broadcast the next step's review).")
+        if out["orphaned_for_you"]:
+            ids = ", ".join(m[:8] for m in out["orphaned_for_you"])
+            return result("reclaim", f"{len(out['orphaned_for_you'])} review(s) claimed "
+                          f"for you were abandoned (watcher likely died): {ids}. "
+                          f"Run reclaim --agent {agent} --force, then continue.")
+        if out["pending_for_you"]:
+            return result("drain", f"{out['pending_for_you']} message(s) in your inbox — "
+                          "claim each, handle it, and complete/decide.")
+
+        # Ball-in-court analysis on the initiator's latest review_request round.
+        rr = self.conn.execute(
+            "SELECT message_id, seq, round FROM messages "
+            "WHERE project=? AND from_agent=? AND type='review_request' "
+            "ORDER BY seq DESC LIMIT 1",
+            (project, agent),
+        ).fetchone()
+        if rr is None:
+            if role in FANOUT_ROLES:
+                return result("wait", "No review request addressed to you yet — wait.")
+            return result("broadcast", "You're the initiator but no review_request has "
+                                       "gone out yet — post/broadcast one to start a round.")
+        out["latest_review_request"] = {
+            "message_id": rr["message_id"], "seq": rr["seq"], "round": rr["round"]}
+        REPLY = ("response", "proposal", "rebuttal", "approval")
+        ph = ",".join("?" * len(REPLY))
+        for rv in reviewers:
+            replied = self.conn.execute(
+                f"SELECT 1 FROM messages WHERE project=? AND from_agent=? "
+                f"AND type IN ({ph}) AND seq>? LIMIT 1",
+                (project, rv, *REPLY, rr["seq"]),
+            ).fetchone()
+            if replied:
+                out["responded"].append(rv)
+            else:
+                out["awaiting"].append({
+                    "agent": rv, "presence": presence(self._heartbeat_of(project, rv))[0]})
+        if reviewers and not out["awaiting"]:
+            return result("decide", "Every reviewer has answered your latest "
+                          "review_request — rebut open points or `decide` to converge "
+                          "and advance the plan.")
+        waiting = ", ".join(f"{a['agent']}({a['presence']})" for a in out["awaiting"])
+        offline = [a["agent"] for a in out["awaiting"] if a["presence"] != "online"]
+        why = f"Waiting on reviewer(s): {waiting or 'none registered'}."
+        if offline:
+            why += (f" {', '.join(offline)} look offline — a watcher may have died; "
+                    "consider (re)launching it, or reclaim if they hold a claim.")
+        return result("wait", why)
 
     def list_projects(self):
         """List every project under this COLLAB_ROOT (projects are per-root)."""
@@ -890,6 +1053,9 @@ class Store:
         out["you_registered"] = bool(mine)
         out["your_role"] = mine["role"] if mine else None
         out["pending_for_you"] = len(self.poll(project, agent)) if agent else 0
+        # In-flight rows are claimed but not completed and thus NOT counted in
+        # pending_for_you; an orphaned one is a review a dead watcher abandoned.
+        out["in_flight_for_you"] = self.in_flight(project, agent) if agent else []
         distinct = {r["agent_id"] for r in parts}
         has_rr = self.conn.execute(
             "SELECT 1 FROM messages WHERE project=? AND type='review_request' LIMIT 1",
@@ -910,10 +1076,18 @@ class Store:
                      "(the `review` verb / `/collab-review <file>` does this in one step).")
         if agent and not mine:
             h.append(f"You ({agent}) are not in this project yet — join as a reviewer.")
+        orphaned = [f for f in out["in_flight_for_you"] if f["orphaned"]]
+        if orphaned:
+            ids = ", ".join(f["message_id"][:8] for f in orphaned)
+            h.append(f"{len(orphaned)} review(s) claimed for you but abandoned "
+                     f"(lease expired, watcher likely died mid-run): {ids}. These are "
+                     "NOT in your pending count. Recover them now with "
+                     f"`reclaim --project {project} --agent {agent} --force` (or wait "
+                     "for the lease to expire and a new claim to sweep them).")
         if out["pending_for_you"]:
             h.append(f"You have {out['pending_for_you']} item(s) to handle: claim each, "
                      "read the referenced artifact, and respond/complete.")
-        elif mine and mine["role"] in FANOUT_ROLES:
+        elif mine and mine["role"] in FANOUT_ROLES and not orphaned:
             h.append("Nothing pending for you right now.")
         approvals = self._approval_status(project)
         out["approvals"] = approvals
@@ -1348,6 +1522,27 @@ def build_parser():
     s.add_argument("--project", required=True)
 
     s = sub.add_parser(
+        "next",
+        help="one recommended action for a self-paced loop "
+             "(reclaim|drain|decide|wait|done|broadcast)")
+    s.add_argument("--project", required=True)
+    s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
+                   help="agent id; defaults to $COLLAB_AGENT")
+
+    s = sub.add_parser(
+        "reclaim",
+        help="recover a dead watcher's stranded claims: return claimed rows to "
+             "pending so a fresh watcher can pick them up")
+    s.add_argument("--project", required=True)
+    s.add_argument("--agent", default=None,
+                   help="only reclaim rows claimed by this recipient")
+    s.add_argument("--message", default=None,
+                   help="only reclaim this specific claimed message_id")
+    s.add_argument("--force", action="store_true",
+                   help="reclaim even leases that have NOT expired yet (use when you "
+                        "know the watcher is dead and won't wait out the lease)")
+
+    s = sub.add_parser(
         "watch",
         help="hands-off reviewer: poll, claim, invoke the agent, post its reply")
     s.add_argument("--project", required=True)
@@ -1380,7 +1575,7 @@ def main(argv=None):
     # doctor intentionally omitted: it must run even when identity is missing, since
     # diagnosing a missing/duplicate COLLAB_AGENT is one of its jobs.
     NEED_AGENT = {"start", "join", "poll", "claim", "ack", "extend", "heartbeat",
-                  "watch", "review", "inbox"}
+                  "watch", "review", "inbox", "next"}
     NEED_FROM = {"post", "complete", "decide"}
     if args.cmd in NEED_AGENT and not getattr(args, "agent", None):
         print(json.dumps({"error": "no agent identity: pass --agent or set "
@@ -1502,6 +1697,11 @@ def main(argv=None):
             _emit(store.doctor(args.project, args.agent))
         elif cmd == "sweep":
             _emit({"reset": store.sweep(args.project)})
+        elif cmd == "next":
+            _emit(store.next_action(args.project, args.agent))
+        elif cmd == "reclaim":
+            _emit(store.reclaim(args.project, message_id=args.message,
+                                agent=args.agent, force=args.force))
         elif cmd == "watch":
             if not args.exec_argv:
                 raise CollabError("--exec requires an agent command, e.g. --exec codex exec")

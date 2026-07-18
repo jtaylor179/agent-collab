@@ -1,6 +1,6 @@
 {
   "name": "agent-collab",
-  "version": "0.3.6",
+  "version": "0.3.8",
   "description": "Collaborate with other AI agents on a shared spec or codebase through a durable message bus. Join a collab project, review work products, and converge on a shared design. Bundles the agent-collab skill and the collab CLI.",
   "author": {
     "name": "Jeff Taylor"

@@ -80,6 +80,7 @@ post     --project X --type review_request --round 1 --artifact <name>@v1 (--bod
 join     --project X [--role reviewer|approver|observer]               # default reviewer
 projects                                                               # list all (no --project)
 status   --project X
+next     --project X --agent <me>                                      # ONE recommended action for a self-paced loop
 doctor   --project X                                                   # "what's wrong / next?"
 poll     --project X --agent <me>                                      # peek inbox (no claim)
 claim    --project X [--wait <sec>] [--poll-interval 2]                # returns claim_token + claim_message_id + body
@@ -95,7 +96,28 @@ decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent
 log      --project X [--since N] [--follow]
 delete   --project X --yes
 watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
+reclaim  --project X [--agent <id>] [--message <id>] [--force]         # recover a dead watcher's stranded claim
 ```
+
+**When a watcher dies mid-review** (agent goes offline, process/machine killed) the
+claimed inbox row is stuck in `claimed` and is INVISIBLE to `poll`/`inbox` (those show
+only `pending`) — an empty pending count can hide an abandoned review. `status` surfaces
+these under `in_flight` (each with an `orphaned` flag = lease expired), and `doctor`
+lists `in_flight_for_you` with a recovery hint. To recover immediately instead of
+waiting out the lease: `reclaim --project X --agent <id> --force` returns the row to
+pending so a fresh watcher picks it up. `reclaim` without `--force` only recovers
+already-expired leases (a reportable, scopeable `sweep`). Reclaim is safe if the old
+watcher was only wedged: it mints no token, so the zombie's later `complete` is fenced
+out (token mismatch), never a double-post.
+
+**Self-paced plans (no manual re-kick).** To advance a multi-step, review-gated plan
+hands-off, don't make the loop interpret `status` (its `open_threads` is noisy — `decide`
+converges a whole project at once). Ask `next --project X --agent <me>` instead: it
+collapses the board into ONE action — `reclaim` (recover an abandoned claim), `drain`
+(handle your inbox), `decide` (all reviewers answered — converge/rebut), `wait` (waiting
+on reviewer(s); names who and if they're offline), `done` (converged — advance to the
+next step), or `broadcast` (initiator, nothing sent yet). The `/collab-loop` command runs
+exactly this tick loop under `/loop`.
 
 Message `--type`: `review_request question response rebuttal proposal approval decision status heartbeat`
 (only the first five create inbox work; approval/decision/status/heartbeat are log-only —
