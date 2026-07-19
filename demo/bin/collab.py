@@ -2334,9 +2334,10 @@ def build_parser():
     s.add_argument("--max", dest="max_items", type=int,
                    help="exit after N processed items")
     s.add_argument("--detach", action="store_true",
-                   help="daemonize (double-fork + new session) so the watcher OUTLIVES "
-                        "the launching shell — required when an agent launches it from a "
-                        "transient per-turn shell, or it dies when that shell is torn down")
+                   help="spawn the watcher in its own session so it OUTLIVES the launching "
+                        "shell — required when an agent launches it from a transient "
+                        "per-turn shell, or it dies when that shell is torn down. Prints "
+                        "the child's pid + log path and returns immediately")
     s.add_argument("--log", help="log file for --detach (default "
                                  "$COLLAB_ROOT/logs/<project>-<agent>.log)")
     s.add_argument(
@@ -2347,26 +2348,50 @@ def build_parser():
     return p
 
 
-def _daemonize(log_path):
-    """POSIX double-fork + setsid so the watcher survives the launching shell's teardown
-    (an agent's per-turn tool-call shell, a closed terminal, a process-group kill). The
-    new session is the key: a signal to the parent's process group won't reach us. All
-    output is redirected to log_path. The caller must reopen any sqlite connection AFTER
-    this (connections must not cross fork())."""
-    d = os.path.dirname(os.path.abspath(log_path))
-    os.makedirs(d, exist_ok=True)
-    if os.fork() > 0:
-        os._exit(0)               # original process returns to the launcher
-    os.setsid()                   # NEW session — immune to the parent pgid's signals
-    if os.fork() > 0:
-        os._exit(0)               # can't reacquire a controlling terminal
-    sys.stdout.flush()
-    sys.stderr.flush()
-    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    os.dup2(fd, 1)
-    os.dup2(fd, 2)
-    nul = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(nul, 0)
+def _spawn_detached(log_path):
+    """Relaunch THIS command (minus --detach) as a fresh process in its own session, with
+    output to log_path, and return the child's pid. The parent then exits, so the watcher
+    survives the launching shell's teardown (an agent's per-turn tool-call shell, a closed
+    terminal, a process-group kill).
+
+    Why spawn (fork+EXEC) instead of the classic double-fork daemonize: continuing to run
+    in a forked child WITHOUT exec is not fork-safe here. On macOS a forked child that
+    then touches sqlite3's native state dies instantly on a signal — no Python exception,
+    no traceback, just an empty log and a vanished process. It's nondeterministic, so some
+    detached watchers ran fine while others died silently (which is exactly how this bug
+    hid). `start_new_session=True` gives fork + exec + setsid: the child gets a clean
+    process image, so there is no fork-without-exec hazard at all."""
+    import subprocess
+    log_path = os.path.abspath(log_path)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    # Drop --detach (and its --log) from the RE-LAUNCHED argv, but only from the part
+    # BEFORE `--exec` — everything after --exec is the agent's own command and must be
+    # passed through untouched (it may legitimately contain similar-looking flags).
+    argv = list(sys.argv[1:])
+    cut = argv.index("--exec") if "--exec" in argv else len(argv)
+    head, tail = argv[:cut], argv[cut:]
+    out = []
+    i = 0
+    while i < len(head):
+        if head[i] == "--detach":
+            i += 1
+            continue
+        if head[i] == "--log":
+            i += 2                      # skip flag + value
+            continue
+        if head[i].startswith("--log="):
+            i += 1
+            continue
+        out.append(head[i])
+        i += 1
+    with open(log_path, "ab") as lf, open(os.devnull, "rb") as nul:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(sys.argv[0])] + out + tail,
+            stdin=nul, stdout=lf, stderr=lf,
+            start_new_session=True,     # fork + exec + setsid
+            cwd=os.getcwd(),
+        )
+    return proc.pid
 
 
 def main(argv=None):
@@ -2548,10 +2573,10 @@ def main(argv=None):
             if getattr(args, "detach", False):
                 log = args.log or os.path.join(
                     store.root, "logs", f"{args.project}-{args.agent}.log")
-                store.close()                       # don't carry a connection across fork
-                print(json.dumps({"detached": True, "log": log}), flush=True)
-                _daemonize(log)
-                store = Store(args.root)             # fresh connection in the daemon
+                store.close()          # the child opens its own connection after exec
+                pid = _spawn_detached(log)
+                _emit({"detached": True, "pid": pid, "log": log})
+                return 0               # parent is done; the detached child does the work
             n = watch(store, args.project, args.agent, args.exec_argv,
                       poll_interval=args.poll_interval, once=args.once,
                       idle_exit=args.idle_exit, max_items=args.max_items,

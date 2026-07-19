@@ -62,7 +62,7 @@ esac
 
 echo "collab-watch: agent=$agent project=$project root=$COLLAB_ROOT repo=$PWD exec=${exec_argv[*]}" >&2
 
-# COLLAB_WATCH_DETACH=1 makes the watcher daemonize (double-fork + setsid) so it OUTLIVES
+# COLLAB_WATCH_DETACH=1 makes the watcher spawn into its own session so it OUTLIVES
 # the shell that launched it. Set this whenever an AGENT launches the watcher from its
 # transient per-turn shell (Cursor/Claude/etc.) — otherwise the watcher is a child of
 # that shell's process group and is killed when the turn ends, orphaning its claim every

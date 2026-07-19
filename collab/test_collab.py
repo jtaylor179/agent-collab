@@ -1969,3 +1969,55 @@ class TestProfiles(Base):
         rc, _ = self._cli("profile", "delete", "--name", "p", "--yes")
         self.assertEqual(rc, 0)
         self.assertEqual(self.s.list_profiles()["count"], 0)
+
+
+class TestDetachedWatcher(Base):
+    """v0.4.5: `watch --detach` must SPAWN (fork+exec, new session), not continue in a
+    forked child. The old double-fork daemonize died on a signal the moment the forked
+    child touched sqlite3's native state (macOS fork-without-exec hazard) — silently, with
+    an empty log and no traceback, and nondeterministically, which is how it hid."""
+
+    def _run(self, *args, timeout=60):
+        import subprocess
+        bin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "collab.py")
+        return subprocess.run(
+            [sys.executable, bin_path, "--root", self.tmp, *args],
+            capture_output=True, text=True, timeout=timeout)
+
+    def test_detached_watcher_actually_processes_work(self):
+        s = self.s
+        s.start("P", "t", "g", "claude-1")
+        s.post("P", "claude-1", "codex-1", "review_request", "review this", round_=1)
+        out = self._run("watch", "--project", "P", "--agent", "codex-1",
+                        "--detach", "--once", "--exec", "/bin/cat")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        info = json.loads(out.stdout)
+        self.assertTrue(info["detached"])
+        self.assertIsInstance(info["pid"], int)      # a real spawned child, not a fork
+        # the detached child must do the work: poll for codex-1's response
+        deadline = time.time() + 45
+        responses = []
+        while time.time() < deadline:
+            responses = [m for m in self.fresh_store().log("P")
+                         if m["type"] == "response" and m["from_agent"] == "codex-1"]
+            if responses:
+                break
+            time.sleep(0.5)
+        try:
+            self.assertTrue(responses,
+                            "detached watcher never posted a response; log: "
+                            + _read_log(info["log"]))
+            # and it logged, rather than dying silently with an empty log
+            self.assertIn("claimed", _read_log(info["log"]))
+        finally:
+            import subprocess
+            subprocess.run(["pkill", "-f", f"watch --project P --agent codex-1"],
+                           capture_output=True)
+
+
+def _read_log(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError:
+        return "(no log file)"
