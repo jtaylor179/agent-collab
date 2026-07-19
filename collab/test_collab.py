@@ -1877,6 +1877,20 @@ class TestProfiles(Base):
         with self.assertRaises(CollabError):     # access references an undeclared id
             self.s.save_profile("p", _prof(access={"stranger-9": "edit"}))
 
+    def test_duplicate_and_noncanonical_ids_rejected(self):
+        with self.assertRaises(CollabError):                       # duplicate
+            self.s.save_profile("p", _prof(reviewers=["codex-1", "codex-1"]))
+        with self.assertRaises(CollabError):                       # whitespace / non-canonical
+            self.s.save_profile("p", _prof(reviewers=[" codex-1 "]))
+
+    def test_worker_approver_overlap_rejected(self):
+        with self.assertRaises(CollabError):
+            self.s.save_profile("p", _prof("orchestrated", workers=["codex-1"],
+                                           approvers=["codex-1"]))
+        # distinct sets are fine
+        self.s.save_profile("ok", _prof("orchestrated", workers=["codex-1"],
+                                        approvers=["claude-1"]))
+
     def test_stray_role_id_rejected(self):
         # a roles key must be a DECLARED participant, not self-declare one
         with self.assertRaises(CollabError):

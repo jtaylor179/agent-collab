@@ -153,8 +153,12 @@ def _validate_profile_data(data):
                     f"a {mode} profile requires '{key}': a non-empty array of agent ids.")
             return []
         if not (isinstance(v, list) and v
-                and all(isinstance(x, str) and x.strip() for x in v)):
-            raise CollabError(f"profile '{key}' must be a non-empty array of agent ids.")
+                and all(isinstance(x, str) and x.strip() and x == x.strip() for x in v)):
+            raise CollabError(
+                f"profile '{key}' must be a non-empty array of canonical (trimmed) "
+                "agent-id strings.")
+        if len(set(v)) != len(v):
+            raise CollabError(f"profile '{key}' has duplicate agent id(s).")
         return v
 
     def _str_map(key, values=None):
@@ -180,7 +184,15 @@ def _validate_profile_data(data):
         participants = set(_id_list("reviewers", required=True))
     else:  # orchestrated
         approvers = _id_list("approvers", required=True)
-        participants = set(_id_list("workers", required=True)) | set(approvers)
+        workers = _id_list("workers", required=True)
+        # A worker can't also be a trusted reviewer of its own work: reject overlap so the
+        # producer≠reviewer separation holds at the profile level too.
+        overlap = set(workers) & set(approvers)
+        if overlap:
+            raise CollabError(
+                f"profile lists agent(s) as BOTH worker and approver: {sorted(overlap)} "
+                "— a worker cannot be a trusted reviewer of its own work.")
+        participants = set(workers) | set(approvers)
         if "accept_policy" in data:
             pol = _valid_policy(data["accept_policy"])
             if pol.startswith("final:") and pol[6:].strip() not in approvers:

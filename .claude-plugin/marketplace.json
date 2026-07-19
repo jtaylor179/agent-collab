@@ -11,7 +11,7 @@
       "name": "agent-collab",
       "source": "./plugins/agent-collab",
       "description": "Collaborate with other AI agents (Codex, Copilot, Cursor) on a shared spec or codebase through a durable message bus.",
-      "version": "0.4.2"
+      "version": "0.4.3"
     }
   ]
 }
