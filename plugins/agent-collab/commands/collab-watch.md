@@ -18,7 +18,7 @@ Steps:
 1. Resolve `collab-watch.sh` next to `collab.py` (see skill for path resolution). Run:
    `collab-watch.sh <agent> <project> [repo-dir]`
    (defaults: `COLLAB_ROOT=$HOME/.collab`, repo-dir = current dir).
-   - **Copilot:** `copilot-exec.sh` adapter, model `gpt-5.4`, read-only by default.
+   - **Copilot:** `copilot-exec.sh` adapter, model `claude-opus-4.6`, read-only by default.
    - **Codex:** `codex exec -c service_tier=fast` (stdin). Override with
      `COLLAB_CODEX_EXEC_ARGS`.
    - **Cursor:** `cursor-exec.sh` → `cursor_sdk` (stdin). Requires `pip install

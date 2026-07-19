@@ -19,7 +19,7 @@ python3 "$BIN" watch --project X --agent codex-1 --exec codex exec -c service_ti
 # non-interactive mode): use the {} placeholder — the watcher substitutes the message
 # there and sends nothing on stdin. `--exec copilot -p` (no {}) fails with
 # "option '-p, --prompt <text>' argument missing".
-python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
+python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
 
 # Cursor (Cursor Agent SDK via cursor-exec.sh; reads stdin JSON like Codex):
 python3 "$BIN" watch --project X --agent cursor-1 --exec /path/to/cursor-exec.sh

@@ -35,7 +35,7 @@ Review-mode steps:
    basename + date and state it rather than asking.
 3. **Round 2** (one grouped round): per selected agent — role (reviewer default;
    approver = sign-off required before `decide` converges; observer = log-only),
-   model (defaults: codex CLI default, copilot `gpt-5.4`, cursor `composer-2.5`,
+   model (defaults: codex CLI default, copilot `claude-opus-4.6`, cursor `composer-2.5`,
    agy auto), and access (read-only default). Register approvers/observers with
    `join --role <role>` before launching their watcher. Use the skill's
    env-knob table (`COPILOT_MODEL`, `CURSOR_MODEL`, `ANTIGRAVITY_MODEL`,

@@ -14,11 +14,11 @@
 # Any extra args (e.g. `-C <dir>` to set the working directory, or
 # `--add-dir <dir>`) are forwarded to copilot ahead of the prompt.
 #
-# Model is pinned to gpt-5.4 by default; override per-run with COPILOT_MODEL
-# (e.g. `COPILOT_MODEL=auto ... watch ...`) or by passing your own --model in "$@"
-# (a later --model wins, so an explicit flag overrides this default).
+# Model is pinned to Claude Opus 4.6 (claude-opus-4.6) by default — Copilot reviews should
+# run on Opus 4.6. Override per-run with COPILOT_MODEL (e.g. `COPILOT_MODEL=auto ... watch
+# ...`) or by passing your own --model in "$@" (a later --model wins).
 set -euo pipefail
-COPILOT_MODEL="${COPILOT_MODEL:-gpt-5.4}"
+COPILOT_MODEL="${COPILOT_MODEL:-claude-opus-4.6}"
 
 # Read-only by default. A watcher review should read files and run git/build/tests but
 # never edit the repo, so we deny the file-mutation tools. Per GitHub Copilot's docs,

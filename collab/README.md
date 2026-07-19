@@ -119,8 +119,8 @@ python3 collab.py watch --project A --agent codex-1 --exec codex exec -c service
 # GitHub Copilot — wants the prompt as the -p arg AND needs --allow-all-tools for
 # non-interactive mode. Use the {} placeholder (--model is optional):
 python3 collab.py watch --project A --agent copilot-1 \
-  --exec copilot --allow-all-tools --model gpt-5.4 -p {}
-# (or the bundled adapter, which reads stdin, pins --model gpt-5.4 [override with
+  --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
+# (or the bundled adapter, which reads stdin, pins --model claude-opus-4.6 [override with
 #  COPILOT_MODEL], and is READ-ONLY by default — denies the edit/create/write tools so
 #  a review can't modify the repo [COPILOT_READONLY=0 to allow writes]:
 #  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo )

@@ -238,7 +238,7 @@ non-participant, and any path/task/secret/token/env/command field). Keys:
 
 Examples — orchestrated:
 `{"schema_version":1,"mode":"orchestrated","workers":["codex-1","copilot-1"],`
-`"approvers":["claude-1"],"accept_policy":"final:claude-1","models":{"copilot-1":"gpt-5.4"},`
+`"approvers":["claude-1"],"accept_policy":"final:claude-1","models":{"copilot-1":"claude-opus-4.6"},`
 `"onboarding":"detached","focus":"correctness"}` · review:
 `{"schema_version":1,"mode":"review","reviewers":["codex-1","copilot-1"],`
 `"roles":{"copilot-1":"approver"},"onboarding":"detached","focus":"security"}`.
@@ -300,7 +300,7 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 | Agent | Model knob | Default model | Read-only knob (default on) |
 |---|---|---|---|
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
-| `copilot-1` | `COPILOT_MODEL` | `gpt-5.4` | `COPILOT_READONLY` |
+| `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.6` | `COPILOT_READONLY` |
 | `cursor-1` | `CURSOR_MODEL` | `composer-2.5` | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
 
@@ -516,7 +516,7 @@ separate terminal so Codex/Copilot/Cursor/Antigravity pick up review requests au
 
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model gpt-5.4 -p {}
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
 # Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 --exec "${COLLAB_BIN%/collab.py}/cursor-exec.sh"
 # Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):
