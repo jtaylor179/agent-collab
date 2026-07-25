@@ -116,22 +116,21 @@ payload is substituted there (and nothing is sent on stdin):
 # Codex — reads the prompt on stdin (default):
 python3 collab.py watch --project A --agent codex-1 --exec codex exec -c service_tier=fast
 
-# GitHub Copilot — wants the prompt as the -p arg AND needs --allow-all-tools for
-# non-interactive mode. Use the {} placeholder (--model is optional):
+# GitHub Copilot — use the bundled adapter. It reads stdin, defaults to
+# claude-opus-4.8/high, and validates Copilot's non-streaming JSONL transport before
+# releasing one final assistant response. Override model/effort with COPILOT_MODEL
+# and COPILOT_REASONING_EFFORT. It is read-only by default; set COPILOT_READONLY=0
+# for write access, or COPILOT_CUSTOM_INSTRUCTIONS=0 for isolated exact-output jobs.
 python3 collab.py watch --project A --agent copilot-1 \
-  --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
-# (or the bundled adapter, which reads stdin, pins --model claude-opus-4.6 [override with
-#  COPILOT_MODEL], and is READ-ONLY by default — denies the edit/create/write tools so
-#  a review can't modify the repo [COPILOT_READONLY=0 to allow writes]:
-#  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo )
+  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo
 
 # everything after --exec is the agent argv; --once / --max N / --idle-exit control
 # lifetime; --lease-min sets the lease; --agent-timeout bounds a hung run.
 ```
 
-> ⚠️ `--exec copilot -p` (no `{}`) does **not** work: the watcher pipes the message on
-> stdin, but `copilot -p` expects the prompt as the flag's value, so it exits with
-> "option '-p, --prompt <text>' argument missing" before reading stdin. Use `-p {}`.
+> ⚠️ Do not replace the adapter with raw Copilot text stdout for exact or long
+> responses. The adapter owns `--output-format json --stream off`, validates the
+> complete JSONL stream, and never trims or repairs the extracted assistant content.
 
 The watcher auto-joins the agent as a reviewer (so it gets backfilled any open
 broadcast) and loops until told to stop. Robustness:

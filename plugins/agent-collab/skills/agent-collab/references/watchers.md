@@ -15,11 +15,11 @@ export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 # Codex (reads instructions from stdin when no prompt arg is given):
 python3 "$BIN" watch --project X --agent codex-1 --exec codex exec -c service_tier=fast
 
-# Copilot (wants the prompt as the -p ARG, not stdin, and needs --allow-all-tools for
-# non-interactive mode): use the {} placeholder — the watcher substitutes the message
-# there and sends nothing on stdin. `--exec copilot -p` (no {}) fails with
-# "option '-p, --prompt <text>' argument missing".
-python3 "$BIN" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
+# Copilot: use the bundled adapter. It converts stdin to -p, captures Copilot's
+# non-streaming JSONL transport, and releases only one validated final assistant
+# message. Raw text stdout is not a safe transport for long/exact responses.
+python3 "$BIN" watch --project X --agent copilot-1 \
+  --exec "${BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
 
 # Cursor (Cursor Agent SDK via cursor-exec.sh; reads stdin JSON like Codex):
 python3 "$BIN" watch --project X --agent cursor-1 --exec /path/to/cursor-exec.sh
@@ -38,6 +38,7 @@ The packaged launcher wraps these defaults:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" codex X /path/to/repo
+"${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" copilot X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" cursor X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" antigravity X /path/to/repo
 ```
@@ -46,6 +47,15 @@ For Codex, the launcher defaults `COLLAB_CODEX_EXEC_ARGS` to
 `-c service_tier=fast`, matching codex-cli 0.125 behavior. Override it per run, for
 example `COLLAB_CODEX_EXEC_ARGS="" ... collab-watch.sh codex X` for plain
 `codex exec`.
+
+For Copilot, the launcher defaults to Claude Opus 4.8 (`claude-opus-4.8`) with
+reasoning effort `high`. Set `COPILOT_MODEL=gpt-5.6-terra` to start with GPT-5.6
+Terra, or use another Copilot model id. Override effort with
+`COPILOT_REASONING_EFFORT=none|minimal|low|medium|high|xhigh|max`. Exact-output
+jobs can set `COPILOT_CUSTOM_INSTRUCTIONS=0`; repository instructions otherwise
+remain enabled for code work. The adapter owns `--output-format json --stream off`,
+fails closed on malformed or ambiguous JSONL, and never trims or repairs the
+assistant content.
 
 For Cursor, install `cursor-sdk` (`pip install cursor-sdk`) and set `CURSOR_API_KEY`.
 Read-only by default (`CURSOR_READONLY=1` → `plan` mode). Override model with

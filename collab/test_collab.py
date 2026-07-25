@@ -411,6 +411,24 @@ class TestWatcher(Base):
         self.assertEqual(responses[0]["to_agent"], "claude-1")  # reply-to-sender
         self.assertEqual(len(s.poll("A", "codex-1")), 0)        # inbox drained
 
+    def test_watch_preserves_agent_stdout_without_trimming(self):
+        s = self.s
+        s.start("A", "exact output", "preserve it", "claude-1")
+        s.post("A", "claude-1", "codex-1", "question", "return exact output",
+               round_=1)
+        exact = ' \n{"answer":1}\n '
+        command = [
+            sys.executable, "-c",
+            f"import sys; sys.stdout.write({exact!r})",
+        ]
+
+        n = watch(s, "A", "codex-1", command, once=True, lease_min=10,
+                  log_fh=self._devnull())
+
+        self.assertEqual(n, 1)
+        responses = [m for m in s.log("A") if m["type"] == "response"]
+        self.assertEqual(responses[0]["body"], exact)
+
     def test_watch_failure_leaves_work_for_redelivery(self):
         s = self.s
         s.start("A", "t", "g", "claude-1")
@@ -1042,6 +1060,63 @@ class TestPayloadBinding(Base):
         argv, stdin_text = _bind_payload(["tool", "--prompt={}"], "HELLO")
         self.assertEqual(argv, ["tool", "--prompt=HELLO"])
         self.assertIsNone(stdin_text)
+
+
+class TestAgentPayloadModes(Base):
+    """Watcher instructions follow the message contract instead of forcing every
+    actionable item through adversarial-review framing."""
+
+    def test_structured_output_task_gets_execution_instructions(self):
+        s = self.s
+        s.start("P", "structured work", "produce a result", "orch-1",
+                role="orchestrator")
+        s.join("P", "worker-1", role="worker")
+        s.put_artifact("P", "input.json", b'{"value": 7}\n', "orch-1")
+        body = (
+            'Return exactly one JSON object matching {"answer": <integer>}. '
+            "Do not include prose or Markdown fences.")
+        s.post("P", "orch-1", "broadcast", "task", body, round_=1,
+               refs={"artifact": "input.json@v1"})
+
+        claimed = s.claim("P", "worker-1")
+        payload = json.loads(_agent_payload(s, "P", "worker-1", claimed))
+
+        self.assertEqual(payload["message"]["type"], "task")
+        self.assertEqual(payload["message"]["body"], body)
+        self.assertEqual(payload["artifact"]["content"], '{"value": 7}\n')
+        self.assertIn("Execute the task", payload["instructions"])
+        self.assertIn("output contract as authoritative", payload["instructions"])
+        self.assertNotIn("strongest substantive objection", payload["instructions"])
+        self.assertNotIn("your review to stdout", payload["instructions"])
+
+    def test_review_request_keeps_adversarial_review_discipline(self):
+        s = self.s
+        s.start("R", "design", "review it", "owner-1")
+        s.join("R", "reviewer-1")
+        s.post("R", "owner-1", "reviewer-1", "review_request",
+               "Review the proposed design.", round_=1)
+
+        claimed = s.claim("R", "reviewer-1")
+        payload = json.loads(_agent_payload(s, "R", "reviewer-1", claimed))
+
+        self.assertIn("strongest substantive objection", payload["instructions"])
+        self.assertIn("reviewing the GOAL", payload["instructions"])
+        self.assertNotIn("Execute the task", payload["instructions"])
+
+    def test_question_gets_direct_answer_instructions(self):
+        s = self.s
+        s.start("Q", "question", "answer it", "owner-1")
+        s.join("Q", "reviewer-1")
+        s.post("Q", "owner-1", "reviewer-1", "question",
+               "Answer with exactly yes or no.", round_=1)
+
+        claimed = s.claim("Q", "reviewer-1")
+        payload = json.loads(_agent_payload(s, "Q", "reviewer-1", claimed))
+
+        self.assertIn("Answer the question directly", payload["instructions"])
+        self.assertIn("requested output format as authoritative",
+                      payload["instructions"])
+        self.assertNotIn("strongest substantive objection", payload["instructions"])
 
 
 EXPIRED = "2000-01-01T00:00:00.000000Z"
@@ -1739,10 +1814,14 @@ class TestProfiles(Base):
     def test_save_get_roundtrip(self):
         s = self.s
         s.save_profile("team", _prof("orchestrated", accept_policy="final:claude-1",
-                                     workers=["codex-1"], approvers=["claude-1"]))
+                                     workers=["copilot-1"], approvers=["claude-1"],
+                                     models={"copilot-1": "gpt-5.6-terra"},
+                                     efforts={"copilot-1": "xhigh"}))
         p = s.get_profile("team")
         self.assertEqual(p["data"]["mode"], "orchestrated")
         self.assertEqual(p["data"]["accept_policy"], "final:claude-1")
+        self.assertEqual(p["data"]["models"]["copilot-1"], "gpt-5.6-terra")
+        self.assertEqual(p["data"]["efforts"]["copilot-1"], "xhigh")
 
     def test_save_overwrites(self):
         s = self.s
@@ -1859,23 +1938,28 @@ class TestProfiles(Base):
         with self.assertRaises(CollabError):
             self.s.save_profile("p", _prof(reviewers=[123]))         # not id strings
 
-    def test_role_and_access_enums_and_maps_validated(self):
+    def test_role_access_and_effort_enums_and_maps_validated(self):
         with self.assertRaises(CollabError):                          # bad role value
             self.s.save_profile("p", _prof(roles={"codex-1": "boss"}))
         with self.assertRaises(CollabError):                          # bad access value
             self.s.save_profile("p", _prof(access={"codex-1": "sudo"}))
+        with self.assertRaises(CollabError):                          # bad effort value
+            self.s.save_profile("p", _prof(efforts={"codex-1": "extreme"}))
         with self.assertRaises(CollabError):                          # models not a map
             self.s.save_profile("p", _prof(models=["gpt"]))
         # valid enums/maps for declared participants pass
         self.s.save_profile("ok", _prof(roles={"codex-1": "approver"},
                                         access={"codex-1": "readonly"},
-                                        models={"codex-1": "o1"}))
+                                        models={"codex-1": "o1"},
+                                        efforts={"codex-1": "high"}))
 
     def test_non_participant_reference_rejected(self):
         with self.assertRaises(CollabError):     # models references an undeclared id
             self.s.save_profile("p", _prof(models={"stranger-9": "gpt"}))
         with self.assertRaises(CollabError):     # access references an undeclared id
             self.s.save_profile("p", _prof(access={"stranger-9": "edit"}))
+        with self.assertRaises(CollabError):     # efforts references an undeclared id
+            self.s.save_profile("p", _prof(efforts={"stranger-9": "high"}))
 
     def test_duplicate_and_noncanonical_ids_rejected(self):
         with self.assertRaises(CollabError):                       # duplicate
@@ -1901,7 +1985,8 @@ class TestProfiles(Base):
         # unhashable values ([] / {}) in enum maps/fields must raise CollabError, not
         # TypeError from `val in <set>`
         for bad in (_prof(roles={"codex-1": []}), _prof(access={"codex-1": {}}),
-                    _prof(mode=[]), _prof(onboarding={})):
+                    _prof(efforts={"codex-1": []}), _prof(mode=[]),
+                    _prof(onboarding={})):
             with self.assertRaises(CollabError):
                 self.s.save_profile("p", bad)
 
@@ -1969,6 +2054,191 @@ class TestProfiles(Base):
         rc, _ = self._cli("profile", "delete", "--name", "p", "--yes")
         self.assertEqual(rc, 0)
         self.assertEqual(self.s.list_profiles()["count"], 0)
+
+
+class TestCopilotExecAdapter(unittest.TestCase):
+    """Copilot starts on the preferred model/effort defaults and accepts per-run
+    overrides without requiring a different watcher command."""
+
+    def _invoke(self, env_overrides=None, extra_args=None):
+        import subprocess
+
+        adapter = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin", "copilot-exec.sh")
+        with tempfile.TemporaryDirectory(prefix="copilot_adapter_test_") as tmp:
+            fake = os.path.join(tmp, "copilot")
+            with open(fake, "w") as fh:
+                fh.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "content = json.dumps(sys.argv[1:])\n"
+                    "print(json.dumps({'type': 'assistant.message', "
+                    "'data': {'content': content}}))\n"
+                    "raise SystemExit(int(os.environ.get('FAKE_COPILOT_EXIT', '0')))\n")
+            os.chmod(fake, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = tmp + os.pathsep + env["PATH"]
+            env.pop("COPILOT_MODEL", None)
+            env.pop("COPILOT_REASONING_EFFORT", None)
+            env.pop("COPILOT_READONLY", None)
+            env.pop("COPILOT_CUSTOM_INSTRUCTIONS", None)
+            env.update(env_overrides or {})
+            out = subprocess.run(
+                [adapter, "-C", "/tmp/review-repo", *(extra_args or [])],
+                input="review payload",
+                capture_output=True, text=True, env=env, timeout=10)
+        return out
+
+    def _run(self, env_overrides=None, extra_args=None):
+        out = self._invoke(env_overrides, extra_args)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_defaults_to_claude_48_with_high_effort(self):
+        args = self._run()
+        self.assertEqual(args[args.index("--model") + 1], "claude-opus-4.8")
+        self.assertEqual(
+            args[args.index("--reasoning-effort") + 1], "high")
+        self.assertEqual(args[args.index("--stream") + 1], "off")
+        self.assertEqual(args[args.index("--output-format") + 1], "json")
+        self.assertNotIn("--no-custom-instructions", args)
+        self.assertEqual(args[-2:], ["-p", "review payload"])
+
+    def test_caller_cannot_override_adapter_transport_flags(self):
+        args = self._run(
+            extra_args=["--stream", "on", "--output-format", "text"])
+        stream_values = [
+            args[index + 1] for index, arg in enumerate(args) if arg == "--stream"]
+        format_values = [
+            args[index + 1]
+            for index, arg in enumerate(args)
+            if arg == "--output-format"
+        ]
+        self.assertEqual(stream_values, ["on", "off"])
+        self.assertEqual(format_values, ["text", "json"])
+        self.assertEqual(args[-2:], ["-p", "review payload"])
+
+    def test_model_and_effort_are_independently_overridable(self):
+        args = self._run({
+            "COPILOT_MODEL": "gpt-5.6-terra",
+            "COPILOT_REASONING_EFFORT": "max",
+        })
+        self.assertEqual(args[args.index("--model") + 1], "gpt-5.6-terra")
+        self.assertEqual(
+            args[args.index("--reasoning-effort") + 1], "max")
+
+    def test_exact_output_mode_can_disable_custom_instructions(self):
+        args = self._run({"COPILOT_CUSTOM_INSTRUCTIONS": "0"})
+        self.assertIn("--no-custom-instructions", args)
+        self.assertEqual(args[args.index("--stream") + 1], "off")
+
+    def test_invalid_custom_instruction_setting_fails_closed(self):
+        import subprocess
+
+        adapter = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin", "copilot-exec.sh")
+        env = os.environ.copy()
+        env["COPILOT_CUSTOM_INSTRUCTIONS"] = "sometimes"
+        out = subprocess.run(
+            [adapter], input="review payload", capture_output=True, text=True,
+            env=env, timeout=10)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("COPILOT_CUSTOM_INSTRUCTIONS", out.stderr)
+
+    def test_nonzero_copilot_exit_withholds_valid_looking_content(self):
+        out = self._invoke({"FAKE_COPILOT_EXIT": "7"})
+        self.assertEqual(out.returncode, 7)
+        self.assertEqual(out.stdout, "")
+        self.assertIn("response withheld", out.stderr)
+
+
+class TestCopilotJsonlExtractor(unittest.TestCase):
+    def _run(self, records):
+        import subprocess
+
+        extractor = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin",
+            "copilot-jsonl-extract.py")
+        return subprocess.run(
+            [sys.executable, extractor], input=records, capture_output=True,
+            timeout=10)
+
+    def test_emits_long_assistant_content_byte_for_byte(self):
+        content = (
+            '{"schema":"example/1","token":"' + ("x" * 20000) +
+            '","nested":{"values":[1,2,3]}}\n'
+        )
+        records = (
+            json.dumps({"type": "session.start", "data": {"id": "abc"}}) + "\n" +
+            json.dumps({"type": "assistant.message",
+                        "data": {"content": content}}) + "\n" +
+            json.dumps({"type": "session.end", "data": {}}) + "\n"
+        ).encode()
+
+        out = self._run(records)
+
+        self.assertEqual(out.returncode, 0, out.stderr.decode())
+        self.assertEqual(out.stdout, content.encode())
+
+    def test_malformed_envelope_withholds_all_content(self):
+        records = (
+            json.dumps({"type": "assistant.message",
+                        "data": {"content": '{"answer":1}'}}) +
+            "\n{not-json}\n"
+        ).encode()
+
+        out = self._run(records)
+
+        self.assertEqual(out.returncode, 2)
+        self.assertEqual(out.stdout, b"")
+        self.assertIn(b"malformed Copilot JSONL", out.stderr)
+
+    def test_duplicate_assistant_messages_fail_closed(self):
+        record = json.dumps(
+            {"type": "assistant.message", "data": {"content": "one"}})
+        out = self._run((record + "\n" + record + "\n").encode())
+        self.assertEqual(out.returncode, 2)
+        self.assertEqual(out.stdout, b"")
+        self.assertIn(b"found 2", out.stderr)
+
+    def test_intermediate_tool_and_subagent_messages_are_not_final(self):
+        records = (
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "content": "",
+                    "toolRequests": [{"toolCallId": "t1", "name": "read"}],
+                },
+            }) + "\n" +
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": "subagent result", "parentToolCallId": "t1"},
+            }) + "\n" +
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": '{"answer":1}'},
+            }) + "\n"
+        ).encode()
+
+        out = self._run(records)
+
+        self.assertEqual(out.returncode, 0, out.stderr.decode())
+        self.assertEqual(out.stdout, b'{"answer":1}')
+
+    def test_missing_or_non_string_content_fails_closed(self):
+        cases = (
+            json.dumps({"type": "session.end", "data": {}}).encode(),
+            json.dumps({"type": "assistant.message",
+                        "data": {"content": {"answer": 1}}}).encode(),
+        )
+        for records in cases:
+            with self.subTest(records=records):
+                out = self._run(records + b"\n")
+                self.assertEqual(out.returncode, 2)
+                self.assertEqual(out.stdout, b"")
 
 
 class TestDetachedWatcher(Base):

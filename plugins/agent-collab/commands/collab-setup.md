@@ -1,5 +1,5 @@
 ---
-description: Interactive wizard — set up a review OR an orchestrated worker plan (roles, models, acceptance policy)
+description: Interactive wizard — set up a review OR an orchestrated worker plan (roles, models, effort, acceptance policy)
 ---
 
 The user wants a guided, interactive setup of a collaboration project. Use the
@@ -9,7 +9,7 @@ section exactly.
 **Round −1 — saved profiles.** FIRST run `profile list`. If any exist, offer "use last
 (`<newest>`) / pick from list / start fresh" (newest-first; `profiles[0]` is last used).
 On reuse, `profile show --name <name> --use` and read its JSON, then SKIP every question it
-answers (mode, roles, models, accept-policy, onboarding) — ask only for the work product.
+answers (mode, roles, models, efforts, accept-policy, onboarding) — ask only for the work product.
 After a FRESH setup, offer to `profile save --name <name> --data '<json>'` the reusable
 answers (never the work-product path). See the skill's "Round −1" for details.
 
@@ -35,10 +35,12 @@ Review-mode steps:
    basename + date and state it rather than asking.
 3. **Round 2** (one grouped round): per selected agent — role (reviewer default;
    approver = sign-off required before `decide` converges; observer = log-only),
-   model (defaults: codex CLI default, copilot `claude-opus-4.6`, cursor `composer-2.5`,
-   agy auto), and access (read-only default). Register approvers/observers with
+   model (defaults: Codex CLI default, Copilot `claude-opus-4.8` with
+   `gpt-5.6-terra` as the recommended alternative, Cursor `composer-2.5`, agy auto),
+   reasoning effort (Copilot defaults to `high`; allow
+   `none|minimal|low|medium|high|xhigh|max`), and access (read-only default). Register approvers/observers with
    `join --role <role>` before launching their watcher. Use the skill's
-   env-knob table (`COPILOT_MODEL`, `CURSOR_MODEL`, `ANTIGRAVITY_MODEL`,
+   env-knob table (`COPILOT_MODEL`, `COPILOT_REASONING_EFFORT`, `CURSOR_MODEL`, `ANTIGRAVITY_MODEL`,
    `COLLAB_CODEX_EXEC_ARGS`, `*_READONLY`).
 4. Execute: `review --project <name> --file <path> --focus "…"` (create + snapshot +
    broadcast in one step), `join --role observer` for observers, then onboard
@@ -48,4 +50,4 @@ Review-mode steps:
    "check collab project <name>".
 
 Arguments (optional): $ARGUMENTS may pre-answer any wizard question (file path,
-reviewers, models…). Ask only what's still missing — never re-ask what was given.
+reviewers, models, efforts…). Ask only what's still missing — never re-ask what was given.

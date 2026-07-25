@@ -131,7 +131,10 @@ collab-watch.sh antigravity X /path/to/repo
 ```
 
 In that mode the bus feeds you each claimed message (instructions + the message + the
-exact artifact content) on stdin; you write ONLY your review to stdout.
+exact artifact content) on stdin. The watcher instructions follow the message type:
+execute a `task` and write only its requested result, answer a `question` directly,
+or write the adversarial review for a `review_request`. An explicit output contract
+in a task or question (for example, an exact JSON schema) is authoritative.
 
 **Hands-off approver:** if you were joined with `--role approver`, the payload's
 instructions say so. To sign off, make the FIRST line of your output exactly

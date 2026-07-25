@@ -213,7 +213,7 @@ last used):
 - **Start fresh** — fall through to Round 0.
 
 When a profile is reused, SKIP every question it already answers (mode, participants +
-roles, models, access, accept-policy, onboarding) and ask ONLY for the **per-run input**,
+roles, models, efforts, access, accept-policy, onboarding) and ask ONLY for the **per-run input**,
 which DIFFERS BY MODE — the profile never stores it:
 - **review** → the **work-product path** + (if not in the profile) the review focus.
 - **orchestrated** → the **task list or a plan-file path** to split into tasks. (Tasks are
@@ -230,15 +230,18 @@ non-participant, and any path/task/secret/token/env/command field). Keys:
   `"workers"` and `"approvers"` (both non-empty `[ids]`). A profile is never so sparse that
   it has no participants.
 - **optional (absent → wizard default, don't re-ask on reuse):** `"models"` (`{agent: model}`),
+  `"efforts"` (`{agent: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"}`),
   `"access"` (`{agent: "readonly"|"edit"}`, default readonly), `"onboarding"`
   (`"detached"|"print"|"interactive"`), `"focus"`; **review** also `"roles"`
   (`{agent: "reviewer"|"approver"|"observer"}`); **orchestrated** also `"accept_policy"`
-  (`"any"|"all"|"final:<id>"`, default `any`). Every id in `models`/`access`/`roles` must be
+  (`"any"|"all"|"final:<id>"`, default `any`). Every id in
+  `models`/`efforts`/`access`/`roles` must be
   a declared participant.
 
 Examples — orchestrated:
 `{"schema_version":1,"mode":"orchestrated","workers":["codex-1","copilot-1"],`
-`"approvers":["claude-1"],"accept_policy":"final:claude-1","models":{"copilot-1":"claude-opus-4.6"},`
+`"approvers":["claude-1"],"accept_policy":"final:claude-1","models":{"copilot-1":"claude-opus-4.8"},`
+`"efforts":{"copilot-1":"high"},`
 `"onboarding":"detached","focus":"correctness"}` · review:
 `{"schema_version":1,"mode":"review","reviewers":["codex-1","copilot-1"],`
 `"roles":{"copilot-1":"approver"},"onboarding":"detached","focus":"security"}`.
@@ -277,7 +280,8 @@ Derive the project name automatically (artifact basename + short date, e.g.
 name already exists.
 
 **Round 2 — per selected agent** (one question per agent, batched into one round):
-role, model, and access, phrased as one choice list per agent. Defaults first.
+role, model, reasoning effort where supported, and access, phrased as one choice list
+per agent. Defaults first.
 
 - **Role:** `reviewer` (default — gets inbox work and must respond), `approver`
   (a reviewer whose explicit sign-off additionally **gates `decide`** — use for a
@@ -291,7 +295,12 @@ role, model, and access, phrased as one choice list per agent. Defaults first.
   plausible the user wants a non-reviewer; otherwise default everyone to reviewer
   and say so.
 - **Model:** offer the default plus 1–2 known alternatives; free-text for anything
-  else. Plumb the choice through the env knob when launching that agent's watcher.
+  else. For Copilot, offer Claude Opus 4.8 (`claude-opus-4.8`, default) and GPT-5.6
+  Terra (`gpt-5.6-terra`) explicitly. Plumb the choice through the env knob when
+  launching that agent's watcher.
+- **Reasoning effort:** for Copilot, default to `high`; allow
+  `none|minimal|low|medium|high|xhigh|max`. Plumb the choice through
+  `COPILOT_REASONING_EFFORT`.
 - **Access:** read-only (default; reviewers should not edit the repo) or
   edit-capable (`*_READONLY=0`).
 
@@ -300,7 +309,7 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 | Agent | Model knob | Default model | Read-only knob (default on) |
 |---|---|---|---|
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
-| `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.6` | `COPILOT_READONLY` |
+| `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` |
 | `cursor-1` | `CURSOR_MODEL` | `composer-2.5` | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
 
@@ -309,7 +318,7 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 chosen mode:
 
 - Mode (a): launch each watcher yourself as a background process, e.g.
-  `COPILOT_MODEL=<choice> COLLAB_WATCH_ARGS="--idle-exit" collab-watch.sh copilot <project> <repo>`
+  `COPILOT_MODEL=<choice> COPILOT_REASONING_EFFORT=<choice> COLLAB_WATCH_ARGS="--idle-exit" collab-watch.sh copilot <project> <repo>`
   (one per reviewer; `--idle-exit` makes a one-shot review; omit it to keep the
   watcher alive for later rounds). Report each response as it lands.
 - Mode (b): print one ready-to-paste `collab-watch.sh` line per reviewer with the
@@ -363,7 +372,7 @@ review mode; ask only if the user wants non-defaults.)
 
 **After a FRESH setup (either wizard), offer to save it as a profile.** If they say yes,
 ask for a short name and run `profile save --name <name> --data '<json>'` with the reusable
-answers (mode, participants + roles, models, access, accept-policy, onboarding, focus — NOT
+answers (mode, participants + roles, models, efforts, access, accept-policy, onboarding, focus — NOT
 the work-product path). Next bare invocation, Round −1 will offer it as "use last / pick
 from list". Don't offer to save when a profile was reused unchanged.
 
@@ -515,8 +524,8 @@ separate terminal so Codex/Copilot/Cursor/Antigravity pick up review requests au
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" agy          X /path/to/repo
 
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
-# Copilot: prompt-as-arg + non-interactive perms; {} is replaced with the message:
-python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
+# Copilot: use the adapter's validated non-streaming JSONL transport:
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec "${COLLAB_BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
 # Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 --exec "${COLLAB_BIN%/collab.py}/cursor-exec.sh"
 # Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):

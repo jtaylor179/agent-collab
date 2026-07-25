@@ -94,7 +94,9 @@ def _valid_policy(policy):
 # plan PATHS, no secrets/tokens/env, no commands. Enforced by an allowlist of keys per mode
 # plus a recursive forbidden-key scan.
 PROFILE_SCHEMA_VERSION = 1
-_PROFILE_COMMON_KEYS = {"schema_version", "mode", "models", "onboarding", "access", "focus"}
+_PROFILE_COMMON_KEYS = {
+    "schema_version", "mode", "models", "efforts", "onboarding", "access", "focus",
+}
 _PROFILE_MODE_KEYS = {
     "review": {"reviewers", "roles"},
     "orchestrated": {"workers", "approvers", "accept_policy"},
@@ -102,6 +104,7 @@ _PROFILE_MODE_KEYS = {
 _PROFILE_ONBOARDING = {"detached", "print", "interactive"}
 _PROFILE_ROLE_VALUES = {"reviewer", "approver", "observer"}
 _PROFILE_ACCESS_VALUES = {"readonly", "edit"}
+_PROFILE_EFFORT_VALUES = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 # keys that must never appear ANYWHERE in a profile (paths / secrets / env / commands / the
 # per-run task or work-product data that belongs to the invocation, not the saved template).
 _PROFILE_FORBIDDEN_KEYS = {
@@ -179,7 +182,8 @@ def _validate_profile_data(data):
         return v
 
     # participants are ONLY the declared participant lists — NOT keys of roles/models/
-    # access (those must reference an already-declared participant, never introduce one).
+    # efforts/access (those must reference an already-declared participant, never
+    # introduce one).
     if mode == "review":
         participants = set(_id_list("reviewers", required=True))
     else:  # orchestrated
@@ -199,8 +203,9 @@ def _validate_profile_data(data):
                 raise CollabError(
                     f"profile accept_policy '{pol}' must name one of the profile's "
                     f"approvers {sorted(approvers)}.")
-    # roles/models/access: valid enums AND every id must be a DECLARED participant.
+    # roles/models/efforts/access: valid enums AND every id must be a DECLARED participant.
     for key, values in (("roles", _PROFILE_ROLE_VALUES), ("models", None),
+                        ("efforts", _PROFILE_EFFORT_VALUES),
                         ("access", _PROFILE_ACCESS_VALUES)):
         stray = set(_str_map(key, values)) - participants
         if stray:
@@ -264,8 +269,8 @@ CREATE TABLE IF NOT EXISTS inbox (
 CREATE INDEX IF NOT EXISTS idx_inbox ON inbox(recipient, status);
 CREATE INDEX IF NOT EXISTS idx_msg_seq ON messages(project, seq);
 -- Saved setup profiles (GLOBAL, per-root — not tied to a project): a named JSON blob
--- capturing the reusable wizard answers (mode, participants+roles, models, accept-policy,
--- onboarding, focus — never the work-product path) so a bare `agent-collab` can offer
+-- capturing the reusable wizard answers (mode, participants+roles, models, efforts,
+-- accept-policy, onboarding, focus — never the work-product path) so a bare `agent-collab` can offer
 -- "use last / pick from list". The bus stores/retrieves opaque JSON; the wizard owns its shape.
 CREATE TABLE IF NOT EXISTS profiles (
   name TEXT PRIMARY KEY,
@@ -1822,6 +1827,45 @@ class Store:
 # --------------------------------------------------------------------------- #
 # watcher — the hands-off reviewer (Phase 3)
 # --------------------------------------------------------------------------- #
+def _agent_instructions(agent, message_type):
+    """Return watcher instructions appropriate to the claimed work item.
+
+    A `task` asks the agent to produce work, while a `review_request` asks for an
+    adversarial review. Keeping those contracts separate matters when the task
+    body requires machine-readable output: review-only framing can otherwise make
+    a correct agent add prose or objections that violate the requested schema.
+    """
+    common = (
+        f"You are {agent}, an AI agent collaborating with other agents over a "
+        "shared bus. Read the message and the referenced artifact. ")
+    if message_type == "task":
+        return common + (
+            "Execute the task described in the message. Treat the message body's "
+            "requested output contract as authoritative: if it requires a specific "
+            "format, schema, or output-only response, follow it exactly. Write ONLY "
+            "the requested result to stdout. Do not turn the task into a review or "
+            "add objections, preamble, commentary, Markdown fences, or a sign-off "
+            "unless the task explicitly requests them.")
+    if message_type == "review_request":
+        return common + (
+            "Write ONLY your review to stdout as plain text. Lead with your "
+            "strongest substantive objection; if you genuinely agree, say "
+            "specifically why and name the one thing you would still change. You "
+            "are reviewing the GOAL, not just the artifact as written: if you think "
+            "the whole approach is wrong, say so plainly and propose the "
+            "alternative — challenging the premise is in scope, not only refining "
+            "the details. No preamble, no sign-off.")
+    if message_type == "question":
+        return common + (
+            "Answer the question directly. Treat any requested output format as "
+            "authoritative and write ONLY the requested answer to stdout, with no "
+            "preamble or sign-off.")
+    return common + (
+        "Respond directly to the message in the context of the ongoing "
+        "collaboration. Follow any requested output format exactly and write ONLY "
+        "the response to stdout, with no preamble or sign-off.")
+
+
 def _agent_payload(store, project, agent, claimed):
     """Build the JSON the agent reads on stdin: the claimed message plus the exact
     artifact version it references. Never interpolated into a shell command."""
@@ -1835,18 +1879,12 @@ def _agent_payload(store, project, agent, claimed):
             artifact = {"ref": ref, "content": data.decode("utf-8", "replace")}
         except (CollabError, ValueError) as e:
             artifact = {"ref": ref, "error": str(e)}
-    instructions = (
-        f"You are {agent}, an AI reviewer collaborating with other agents over a "
-        "shared bus. Read the message and the referenced artifact, then write ONLY "
-        "your review to stdout as plain text. Lead with your strongest substantive "
-        "objection; if you genuinely agree, say specifically why and name the one "
-        "thing you would still change. You are reviewing the GOAL, not just the "
-        "artifact as written: if you think the whole approach is wrong, say so "
-        "plainly and propose the alternative — challenging the premise is in scope, "
-        "not only refining the details. No preamble, no sign-off.")
+    message_type = claimed.get("type")
+    instructions = _agent_instructions(agent, message_type)
     me = next((r for r in store.participants(project)
                if r["agent_id"] == agent), None)
-    if me and me["role"] == "approver":
+    if (me and me["role"] == "approver"
+            and message_type in ("review_request", "response", "rebuttal", "proposal")):
         instructions += (
             " ADDITIONALLY: you are an APPROVER on this project — the initiator "
             "cannot converge until you formally sign off. If (and only if) you are "
@@ -1973,9 +2011,9 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
         rc, out, err = _run_agent_with_heartbeat(
             store, project, agent, claimed, exec_argv, payload, lease_min,
             agent_timeout=agent_timeout)
-        review = (out or "").strip()
+        response_body = out or ""
 
-        if rc != 0 or not review:
+        if rc != 0 or not response_body.strip():
             if max_deliveries and deliveries >= max_deliveries:
                 try:
                     store.mark_stalled(project, cm, agent, tok)
@@ -2013,10 +2051,10 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
         # unblocks decide) instead of a plain response. Reviewers' output is never
         # promoted — the marker only means something from an approver.
         mtype = reply_type
-        if my_role == "approver" and _signals_approval(review):
+        if my_role == "approver" and _signals_approval(response_body):
             mtype = "approval"
         try:
-            store.complete(project, agent, cm, tok, mtype, review,
+            store.complete(project, agent, cm, tok, mtype, response_body,
                            round_=rnd, parent=cm,
                            idempotency_key=f"{agent}:{mtype}:{cm}:r{rnd}")
         except CollabError as e:

@@ -97,8 +97,9 @@ absolute path to `skills/agent-collab/bin/collab.py`:
 BIN="/absolute/path/to/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 python3 "$BIN" watch --project A --agent codex-1   --exec codex exec -c service_tier=fast
-# Copilot wants the prompt as an arg + non-interactive perms; {} = the message:
-python3 "$BIN" watch --project A --agent copilot-1 --exec copilot --allow-all-tools --model claude-opus-4.6 -p {}
+# Copilot uses the adapter's validated non-streaming JSONL transport:
+python3 "$BIN" watch --project A --agent copilot-1 \
+  --exec "${BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
 ```
 
 See `skills/agent-collab/references/watchers.md` for flags, overrides, and failure handling.
