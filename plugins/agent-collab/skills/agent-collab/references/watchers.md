@@ -75,8 +75,46 @@ For Antigravity, ensure `agy` is on PATH. Read-only by default
 | `--poll-interval S` | 2.0 | seconds between polls when waiting |
 | `--lease-min M` | 10 | lease length in minutes (fractional allowed) |
 | `--agent-timeout S` | 600 | kill the agent if it runs longer than this |
+| `--output-admission-argv JSON` | — | fixed validator argv as a JSON string array; must appear before `--exec` |
+| `--output-admission-timeout S` | 30 | fail-closed validator timeout (maximum 300 seconds) |
 | `--max-deliveries N` | 5 | mark a message `stalled` after N failed attempts |
 | `--reply-type T` | response | message type the watcher posts back |
+
+## Fail-closed output admission
+
+For a structured-output job, a watcher can validate an agent's nonempty `rc=0`
+stdout before it calls `Store.complete`:
+
+```bash
+python3 "$BIN" watch --project X --agent copilot-1 \
+  --output-admission-argv '["python3","/absolute/path/validate.py","--strict"]' \
+  --output-admission-timeout 20 \
+  --exec "${BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
+```
+
+The validator command is a fixed JSON argv array, never a shell string. It receives
+a `collab-watcher-output-admission/1` JSON envelope on stdin with:
+
+- `assignment`: watcher/broker-owned `project`, `recipient_agent`,
+  `claim_message_id`, `message_id`, source-message `idempotency_key`, `type`,
+  `round`, `artifact_ref`, and raw `refs_json`;
+- `agent_payload`: the exact JSON string sent to the agent, binding the claimed
+  message and immutable artifact version;
+- `response`: the exact opaque, untrimmed agent response string.
+
+Exit `0` admits that original response. Every other outcome rejects it; validator
+stdout can never replace or repair the response. Rejections use the same immediate
+release, bounded redelivery, and stalled audit behavior as agent failures. Because
+bounded stdout/stderr snippets are retained as rejection diagnostics, validators
+must emit concise errors and must never print the payload, artifact, or response.
+
+With `collab-watch.sh`, pass the JSON safely as one environment value:
+
+```bash
+export COLLAB_OUTPUT_ADMISSION_ARGV='["python3","/absolute/path/validate.py"]'
+export COLLAB_OUTPUT_ADMISSION_TIMEOUT=20
+collab-watch.sh copilot X /path/to/repo
+```
 
 ## Failure handling
 
@@ -85,6 +123,8 @@ For Antigravity, ensure `agy` is on PATH. Read-only by default
   `--max-deliveries`, after which the message is marked `stalled` (out of rotation) and
   an audit `status` message is written to the log. Check `status --project X` →
   `stalled` to see these.
+- **Output validator rejects / fails / times out** → no response is posted; the same
+  release/redelivery/stall path applies, with bounded diagnostics retained.
 - **Lost lease at reply time** → logged and skipped; the watcher keeps running.
 
 ## Staying in one interactive session (`claim --wait`)

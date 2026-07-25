@@ -42,6 +42,9 @@ import uuid
 from datetime import datetime, timezone
 
 DEFAULT_LEASE_MIN = 10
+DEFAULT_OUTPUT_ADMISSION_TIMEOUT = 30.0
+MAX_OUTPUT_ADMISSION_TIMEOUT = 300.0
+OUTPUT_ADMISSION_SCHEMA = "collab-watcher-output-admission/1"
 ROLES = ("initiator", "reviewer", "approver", "observer", "worker", "orchestrator")
 # Roles that receive broadcast fan-out and late-join backfill of REVIEW-type work. An
 # approver is a reviewer whose sign-off additionally gates decide() and is the ONLY role
@@ -1957,24 +1960,160 @@ def _run_agent_with_heartbeat(store, project, agent, claimed, exec_argv,
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE)
         try:
-            out, err = proc.communicate(input=stdin_text, timeout=agent_timeout)
-            return proc.returncode, out, err
+            stdin_bytes = (
+                stdin_text.encode("utf-8") if stdin_text is not None else None)
+            out, err = proc.communicate(
+                input=stdin_bytes, timeout=agent_timeout)
+            return (
+                proc.returncode,
+                (out or b"").decode("utf-8", "replace"),
+                (err or b"").decode("utf-8", "replace"),
+            )
         except subprocess.TimeoutExpired:
             # a hung agent must not hold the lease forever (Codex finding #1):
             # kill it, stop heartbeating, return failure so the claim expires.
             proc.kill()
             out, err = proc.communicate()
-            return -1, out, (err or "") + f"\n[watch] agent exceeded {agent_timeout}s; killed"
+            out_text = (out or b"").decode("utf-8", "replace")
+            err_text = (err or b"").decode("utf-8", "replace")
+            return (
+                -1,
+                out_text,
+                err_text + f"\n[watch] agent exceeded {agent_timeout}s; killed",
+            )
     finally:
         stop.set()
         t.join(timeout=2)
 
 
+def _normalize_output_admission_argv(argv):
+    """Validate a fixed validator argv without ever routing it through a shell."""
+    if not isinstance(argv, (list, tuple)) or not argv:
+        raise CollabError(
+            "output-admission argv must be a non-empty JSON array of strings")
+    normalized = []
+    for i, value in enumerate(argv):
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise CollabError(
+                "output-admission argv must contain only non-empty strings "
+                f"without NUL bytes (invalid item {i})")
+        normalized.append(value)
+    return normalized
+
+
+def _parse_output_admission_argv(value):
+    """argparse converter for --output-admission-argv's JSON array."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(
+            f"output-admission argv must be valid JSON: {e}") from e
+    try:
+        return _normalize_output_admission_argv(parsed)
+    except CollabError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
+def _parse_output_admission_timeout(value):
+    """Keep output validation finite even when configured from an external launcher."""
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as e:
+        raise argparse.ArgumentTypeError(
+            "output-admission timeout must be a number") from e
+    if not 0 < timeout <= MAX_OUTPUT_ADMISSION_TIMEOUT:
+        raise argparse.ArgumentTypeError(
+            "output-admission timeout must be greater than 0 and no more than "
+            f"{MAX_OUTPUT_ADMISSION_TIMEOUT:g} seconds")
+    return timeout
+
+
+def _output_admission_assignment(project, agent, claimed):
+    """Return broker-owned identity/binding fields for an output validator."""
+    refs_json = claimed.get("refs_json")
+    try:
+        refs = json.loads(refs_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        refs = {}
+    return {
+        "project": project,
+        "recipient_agent": agent,
+        "claim_message_id": claimed.get("claim_message_id"),
+        "message_id": claimed.get("message_id"),
+        "idempotency_key": claimed.get("idempotency_key"),
+        "type": claimed.get("type"),
+        "round": claimed.get("round"),
+        "artifact_ref": refs.get("artifact"),
+        "refs_json": refs_json,
+    }
+
+
+def _run_output_admission(validator_argv, assignment, agent_payload,
+                          response_body, timeout):
+    """Ask a fixed validator process whether an opaque agent response is admissible.
+
+    The validator receives one JSON envelope on stdin and communicates only through
+    its exit status: zero admits, every other outcome rejects. Its stdout is captured
+    solely for failure diagnostics and can never replace or transform response_body.
+    """
+    import subprocess
+
+    envelope = json.dumps({
+        "schema": OUTPUT_ADMISSION_SCHEMA,
+        # Broker-owned assignment identity. Validators must bind reviewer/worker
+        # identity to this object, never to claims inside the untrusted response.
+        "assignment": assignment,
+        # This is the exact JSON string previously sent to the agent. Keeping it
+        # opaque binds validation to the same claimed message + immutable artifact.
+        "agent_payload": agent_payload,
+        # This is the exact, untrimmed response string returned by the agent.
+        "response": response_body,
+    }, ensure_ascii=False)
+    try:
+        proc = subprocess.run(
+            validator_argv,
+            input=envelope.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout = (
+            e.stdout.decode("utf-8", "replace")
+            if isinstance(e.stdout, bytes) else e.stdout)
+        stderr = (
+            e.stderr.decode("utf-8", "replace")
+            if isinstance(e.stderr, bytes) else e.stderr)
+        detail = _output_admission_diagnostic(stdout, stderr)
+        suffix = f"; {detail}" if detail else ""
+        return -1, f"validator exceeded {timeout:g}s; killed{suffix}"
+    except OSError as e:
+        return -1, f"could not execute validator: {e}"
+    return proc.returncode, _output_admission_diagnostic(proc.stdout, proc.stderr)
+
+
+def _output_admission_diagnostic(stdout, stderr):
+    """Format bounded validator diagnostics for watcher logs and stalled audits."""
+    parts = []
+    if stdout:
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        parts.append(f"stdout: {stdout.strip()}")
+    if stderr:
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        parts.append(f"stderr: {stderr.strip()}")
+    return "; ".join(parts)[:1000]
+
+
 def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
           idle_exit=False, max_items=None, lease_min=DEFAULT_LEASE_MIN,
           reply_type="response", agent_timeout=600.0, max_deliveries=5,
+          output_admission_argv=None,
+          output_admission_timeout=DEFAULT_OUTPUT_ADMISSION_TIMEOUT,
           log_fh=sys.stderr):
     """Poll the bus for work addressed to `agent`; for each claimed message, invoke
     the agent single-shot and post its output back atomically. The agent-agnostic
@@ -1984,6 +2123,14 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
     max_deliveries times is marked 'stalled' (taken out of rotation, surfaced to
     the human) instead of retrying forever; a lost lease at complete time is logged
     and skipped rather than crashing the daemon."""
+    if output_admission_argv is not None:
+        output_admission_argv = _normalize_output_admission_argv(
+            output_admission_argv)
+        try:
+            output_admission_timeout = _parse_output_admission_timeout(
+                output_admission_timeout)
+        except argparse.ArgumentTypeError as e:
+            raise CollabError(str(e)) from e
     store.get_project(project)
     if agent not in {r["agent_id"] for r in store.participants(project)}:
         try:
@@ -2013,18 +2160,47 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
             agent_timeout=agent_timeout)
         response_body = out or ""
 
+        failure_kind = None
+        failure_rc = rc
+        failure_detail = err or ""
         if rc != 0 or not response_body.strip():
+            failure_kind = "agent failed"
+        elif output_admission_argv is not None:
+            # The agent heartbeat has stopped, so explicitly extend the lease to
+            # cover the validator's bounded runtime before invoking it.
+            admission_lease_min = max(
+                lease_min, (output_admission_timeout + 5.0) / 60.0)
+            try:
+                store.extend(project, agent, cm, tok, admission_lease_min)
+                admission_rc, admission_detail = _run_output_admission(
+                    output_admission_argv,
+                    _output_admission_assignment(project, agent, claimed),
+                    payload, response_body,
+                    output_admission_timeout)
+            except CollabError as e:
+                admission_rc, admission_detail = -1, str(e)
+            if admission_rc != 0:
+                failure_kind = "output admission rejected"
+                failure_rc = admission_rc
+                failure_detail = admission_detail
+
+        if failure_kind is not None:
+            audit_detail = (failure_detail or "").strip()[:500]
+            audit_suffix = f"; diagnostic: {audit_detail}" if audit_detail else ""
             if max_deliveries and deliveries >= max_deliveries:
                 try:
                     store.mark_stalled(project, cm, agent, tok)
                     # leave an audit trail in the log so a human notices (status-only,
                     # kept in the stalled message's thread so it doesn't fork a thread)
                     store.post(project, agent, "broadcast", "status",
-                               f"stalled message {cm}: agent failed {deliveries} times "
-                               f"(last rc={rc})", thread_id=claimed.get("thread_id"))
+                               f"stalled message {cm}: {failure_kind} "
+                               f"{deliveries} times (last rc={failure_rc})"
+                               f"{audit_suffix}",
+                               thread_id=claimed.get("thread_id"))
                     print(f"[watch] {cm[:8]} STALLED after {deliveries} failed deliveries "
-                          f"(rc={rc}); taken out of rotation. stderr: "
-                          f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
+                          f"({failure_kind}, rc={failure_rc}); taken out of rotation. "
+                          f"diagnostic: {audit_detail[:200]}",
+                          file=log_fh, flush=True)
                 except CollabError as e:
                     print(f"[watch] could not stall {cm[:8]} ({e}); lease no longer held",
                           file=log_fh, flush=True)
@@ -2035,13 +2211,14 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
                 # it for lease expiry if the release can't go through (lease already lost).
                 try:
                     store.release(project, agent, cm, tok)
-                    print(f"[watch] agent failed (rc={rc}); released for redelivery "
-                          f"({deliveries}/{max_deliveries}). stderr: "
-                          f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
+                    print(f"[watch] {failure_kind} (rc={failure_rc}); released for "
+                          f"redelivery ({deliveries}/{max_deliveries}). diagnostic: "
+                          f"{audit_detail[:200]}", file=log_fh, flush=True)
                 except CollabError:
-                    print(f"[watch] agent failed (rc={rc}); lease already lost, leaving "
-                          f"for sweep ({deliveries}/{max_deliveries}). stderr: "
-                          f"{(err or '').strip()[:200]}", file=log_fh, flush=True)
+                    print(f"[watch] {failure_kind} (rc={failure_rc}); lease already "
+                          f"lost, leaving for sweep ({deliveries}/{max_deliveries}). "
+                          f"diagnostic: {audit_detail[:200]}",
+                          file=log_fh, flush=True)
             if once:
                 break
             continue
@@ -2363,6 +2540,17 @@ def build_parser():
     s.add_argument("--lease-min", type=float, default=DEFAULT_LEASE_MIN)
     s.add_argument("--agent-timeout", type=float, default=600.0,
                    help="kill the agent if it runs longer than this (seconds)")
+    s.add_argument(
+        "--output-admission-argv",
+        type=_parse_output_admission_argv,
+        help="optional fail-closed output validator as a JSON argv array; place this "
+             "flag before --exec. The validator receives a binding JSON envelope on "
+             "stdin and admits only by exiting 0; its stdout can never replace output")
+    s.add_argument(
+        "--output-admission-timeout",
+        type=_parse_output_admission_timeout,
+        default=None,
+        help="validator timeout in seconds (default 30, maximum 300)")
     s.add_argument("--max-deliveries", type=int, default=5,
                    help="mark a message 'stalled' after this many failed attempts")
     s.add_argument("--reply-type", default="response", choices=MSG_TYPES)
@@ -2608,6 +2796,11 @@ def main(argv=None):
         elif cmd == "watch":
             if not args.exec_argv:
                 raise CollabError("--exec requires an agent command, e.g. --exec codex exec")
+            if (args.output_admission_argv is None
+                    and args.output_admission_timeout is not None):
+                raise CollabError(
+                    "--output-admission-timeout requires "
+                    "--output-admission-argv")
             if getattr(args, "detach", False):
                 log = args.log or os.path.join(
                     store.root, "logs", f"{args.project}-{args.agent}.log")
@@ -2620,7 +2813,12 @@ def main(argv=None):
                       idle_exit=args.idle_exit, max_items=args.max_items,
                       lease_min=args.lease_min, reply_type=args.reply_type,
                       agent_timeout=args.agent_timeout,
-                      max_deliveries=args.max_deliveries)
+                      max_deliveries=args.max_deliveries,
+                      output_admission_argv=args.output_admission_argv,
+                      output_admission_timeout=(
+                          args.output_admission_timeout
+                          if args.output_admission_timeout is not None
+                          else DEFAULT_OUTPUT_ADMISSION_TIMEOUT))
             _emit({"processed": n})
         else:
             raise CollabError(f"unknown command: {cmd}")

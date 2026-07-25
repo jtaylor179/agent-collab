@@ -97,7 +97,8 @@ decide   --project X [--thread <id>] (--body <text> | --body-file <f>) [--parent
             # message; --force converges anyway (recorded in the output).
 log      --project X [--since N] [--follow]
 delete   --project X --yes
-watch    --project X --exec codex exec -c service_tier=fast             # hands-off reviewer loop
+watch    --project X [--output-admission-argv JSON] [--output-admission-timeout S] \
+            --exec codex exec -c service_tier=fast                       # hands-off reviewer loop
 reclaim  --project X [--agent <id>] [--message <id>] [--force]         # recover a dead watcher's stranded claim
 policy   --project X [--set any|all|final:<agent-id>]                  # show/set task acceptance policy
 profile  save --name X (--data <json> | --data-file <f|->)            # save a reusable setup profile (global)

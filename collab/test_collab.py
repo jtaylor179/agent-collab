@@ -481,6 +481,70 @@ class TestWatcher(Base):
         self.assertEqual(row["deliveries"], 1)
         self.assertEqual(row["status"], "done")
 
+    def test_output_admission_accepts_without_mutating_response_and_binds_input(self):
+        """A validator may admit only; even stdout that looks like a replacement is
+        ignored, while its envelope binds the original claim/artifact and response."""
+        s = self.s
+        s.start("A", "exact output", "preserve it", "claude-1")
+        artifact = s.put_artifact(
+            "A", "spec.md", b"# immutable\nvalidator binding\n", "claude-1")
+        s.post(
+            "A", "claude-1", "codex-1", "question", "return exact output",
+            round_=1, refs={"artifact": artifact["artifact"]},
+            idempotency_key="source-assignment-1")
+        exact = (
+            ' \n{"answer":"caf\u00e9","nul":"\x00",'
+            '"recipient_agent":"untrusted-worker-claim"}\r\n ')
+        agent = [
+            sys.executable, "-c",
+            f"import sys; sys.stdout.write({exact!r})",
+        ]
+        capture = os.path.join(self.tmp, "admission-envelope.json")
+        validator = [
+            sys.executable, "-c",
+            "import json,sys; "
+            "d=json.load(sys.stdin); "
+            "open(sys.argv[1],'w',encoding='utf-8').write(json.dumps(d)); "
+            "sys.stdout.write('THIS MUST NOT REPLACE THE RESPONSE')",
+            capture,
+        ]
+
+        n = watch(
+            s, "A", "codex-1", agent, once=True, lease_min=10,
+            output_admission_argv=validator, log_fh=self._devnull())
+
+        self.assertEqual(n, 1)
+        response = [m for m in s.log("A") if m["type"] == "response"][0]
+        self.assertEqual(response["body"].encode("utf-8"), exact.encode("utf-8"))
+        with open(capture, encoding="utf-8") as fh:
+            envelope = json.load(fh)
+        self.assertEqual(
+            envelope["schema"], "collab-watcher-output-admission/1")
+        self.assertEqual(envelope["response"], exact)
+        assignment = envelope["assignment"]
+        self.assertEqual(assignment["project"], "A")
+        self.assertEqual(assignment["recipient_agent"], "codex-1")
+        self.assertEqual(
+            assignment["claim_message_id"], assignment["message_id"])
+        self.assertEqual(
+            assignment["idempotency_key"], "source-assignment-1")
+        self.assertEqual(assignment["type"], "question")
+        self.assertEqual(assignment["round"], 1)
+        self.assertEqual(assignment["artifact_ref"], artifact["artifact"])
+        self.assertEqual(
+            json.loads(assignment["refs_json"]),
+            {"artifact": artifact["artifact"]})
+        # The opaque worker output tries to assert a different identity, but it
+        # cannot affect the assignment object supplied by the watcher/broker.
+        self.assertIn(
+            '"recipient_agent":"untrusted-worker-claim"', exact)
+        payload = json.loads(envelope["agent_payload"])
+        self.assertEqual(payload["message"]["body"], "return exact output")
+        self.assertEqual(payload["artifact"], {
+            "ref": artifact["artifact"],
+            "content": "# immutable\nvalidator binding\n",
+        })
+
 
 class TestWatcherHardening(Base):
     def _devnull(self):
@@ -596,6 +660,172 @@ class TestWatcherHardening(Base):
         finally:
             s.complete = orig_complete
         self.assertEqual(n, 0)  # returned cleanly, no exception escaped
+
+    def test_output_admission_rejection_redelivers_then_stalls_with_diagnostics(self):
+        s = self._setup_review()
+        agent = [
+            sys.executable, "-c",
+            "import sys; sys.stdout.write('opaque response')",
+        ]
+        validator = [
+            sys.executable, "-c",
+            "import sys; sys.stderr.write('schema mismatch at $.result'); sys.exit(7)",
+        ]
+        log = io.StringIO()
+
+        n = watch(
+            s, "A", "codex-1", agent, once=True, lease_min=10,
+            max_deliveries=2, output_admission_argv=validator, log_fh=log)
+
+        self.assertEqual(n, 0)
+        self.assertEqual([m for m in s.log("A") if m["type"] == "response"], [])
+        row = s.conn.execute(
+            "SELECT status, deliveries FROM inbox WHERE recipient='codex-1'"
+        ).fetchone()
+        self.assertEqual(dict(row), {"status": "pending", "deliveries": 1})
+        self.assertIn("output admission rejected", log.getvalue())
+        self.assertIn("schema mismatch", log.getvalue())
+
+        watch(
+            s, "A", "codex-1", agent, once=True, lease_min=10,
+            max_deliveries=2, output_admission_argv=validator, log_fh=log)
+
+        row = s.conn.execute(
+            "SELECT status, deliveries FROM inbox WHERE recipient='codex-1'"
+        ).fetchone()
+        self.assertEqual(dict(row), {"status": "stalled", "deliveries": 2})
+        self.assertEqual([m for m in s.log("A") if m["type"] == "response"], [])
+        audit = [m for m in s.log("A") if m["type"] == "status"][-1]["body"]
+        self.assertIn("output admission rejected", audit)
+        self.assertIn("schema mismatch at $.result", audit)
+
+    def test_output_admission_timeout_and_exec_error_fail_closed(self):
+        for validator, expected in (
+            ([sys.executable, "-c", "import time; time.sleep(2)"],
+             "validator exceeded"),
+            ([os.path.join(self.tmp, "missing-validator")],
+             "could not execute validator"),
+        ):
+            with self.subTest(expected=expected):
+                s = self.fresh_store()
+                project = f"P-{expected.split()[0]}"
+                s.start(project, "t", "g", "claude-1")
+                s.post(
+                    project, "claude-1", "codex-1", "question", "q", round_=1)
+                log = io.StringIO()
+                try:
+                    n = watch(
+                        s, project, "codex-1",
+                        [sys.executable, "-c",
+                         "import sys; sys.stdout.write('opaque response')"],
+                        once=True, lease_min=10,
+                        output_admission_argv=validator,
+                        output_admission_timeout=0.05,
+                        log_fh=log)
+                    self.assertEqual(n, 0)
+                    self.assertEqual(
+                        [m for m in s.log(project) if m["type"] == "response"], [])
+                    self.assertEqual(len(s.poll(project, "codex-1")), 1)
+                    self.assertIn(expected, log.getvalue())
+                finally:
+                    s.close()
+
+    def test_output_admission_is_not_run_for_empty_agent_output(self):
+        s = self._setup_review()
+        marker = os.path.join(self.tmp, "validator-ran")
+        validator = [
+            sys.executable, "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')",
+            marker,
+        ]
+
+        n = watch(
+            s, "A", "codex-1",
+            [sys.executable, "-c", "pass"],
+            once=True, lease_min=10,
+            output_admission_argv=validator,
+            log_fh=self._devnull())
+
+        self.assertEqual(n, 0)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual([m for m in s.log("A") if m["type"] == "response"], [])
+        self.assertEqual(len(s.poll("A", "codex-1")), 1)
+
+    def test_malformed_output_admission_config_fails_before_claim(self):
+        import subprocess
+
+        s = self._setup_review()
+        bin_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "collab.py")
+        bad_values = ("not-json", "{}", "[]", '[""]', "[1]")
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                result = subprocess.run(
+                    [
+                        sys.executable, bin_path, "--root", self.tmp,
+                        "watch", "--project", "A", "--agent", "codex-1",
+                        "--output-admission-argv", bad,
+                        "--once", "--exec", "/bin/cat",
+                    ],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("output-admission argv", result.stderr)
+        for bad_timeout in ("0", "301", "forever"):
+            with self.subTest(timeout=bad_timeout):
+                result = subprocess.run(
+                    [
+                        sys.executable, bin_path, "--root", self.tmp,
+                        "watch", "--project", "A", "--agent", "codex-1",
+                        "--output-admission-argv", '["/usr/bin/true"]',
+                        "--output-admission-timeout", bad_timeout,
+                        "--once", "--exec", "/bin/cat",
+                    ],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("output-admission timeout", result.stderr)
+        result = subprocess.run(
+            [
+                sys.executable, bin_path, "--root", self.tmp,
+                "watch", "--project", "A", "--agent", "codex-1",
+                "--output-admission-timeout", "20",
+                "--once", "--exec", "/bin/cat",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "--output-admission-timeout requires --output-admission-argv",
+            result.stderr)
+        # Parser/config errors occur before Store.claim; the queued delivery is intact.
+        row = s.conn.execute(
+            "SELECT status, deliveries FROM inbox WHERE recipient='codex-1'"
+        ).fetchone()
+        self.assertEqual(dict(row), {"status": "pending", "deliveries": 0})
+
+        # A JSON argv containing spaces survives argparse REMAINDER and coexists
+        # safely with a separate --exec argv.
+        validator_json = json.dumps([
+            sys.executable, "-c",
+            "import json,sys; "
+            "d=json.load(sys.stdin); "
+            "assert d['assignment']['recipient_agent']=='codex-1'; "
+            "assert d['response']",
+        ])
+        result = subprocess.run(
+            [
+                sys.executable, bin_path, "--root", self.tmp,
+                "watch", "--project", "A", "--agent", "codex-1",
+                "--output-admission-argv", validator_json,
+                "--once", "--exec", "/bin/cat",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"processed": 1})
+        self.assertEqual(
+            len([m for m in s.log("A") if m["type"] == "response"]), 1)
 
 
 class TestV02Usability(Base):
@@ -794,6 +1024,25 @@ class TestVersionConsistency(unittest.TestCase):
         self.assertEqual(
             {cv, xv, mv}, {cv},
             f"manifest version drift: claude={cv} codex={xv} marketplace={mv}")
+
+    def test_bundled_cli_copies_match_canonical(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        canonical = os.path.join(root, "collab", "collab.py")
+        bundled = (
+            os.path.join(
+                root,
+                "plugins/agent-collab/skills/agent-collab/bin/collab.py"),
+            os.path.join(root, "demo", "bin", "collab.py"),
+        )
+        if not all(os.path.exists(path) for path in (canonical, *bundled)):
+            self.skipTest("bundled CLI copies not present")
+        with open(canonical, "rb") as fh:
+            expected = fh.read()
+        for path in bundled:
+            with self.subTest(path=path), open(path, "rb") as fh:
+                self.assertEqual(
+                    fh.read(), expected,
+                    f"bundled collab.py drifted from {canonical}")
 
 
 if __name__ == "__main__":

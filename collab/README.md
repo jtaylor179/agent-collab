@@ -132,6 +132,56 @@ python3 collab.py watch --project A --agent copilot-1 \
 > responses. The adapter owns `--output-format json --stream off`, validates the
 > complete JSONL stream, and never trims or repairs the extracted assistant content.
 
+### Optional fail-closed output admission
+
+Structured jobs can place a validator between successful agent execution and
+`Store.complete`. Configure its fixed command as one JSON argv array **before**
+`--exec`; no shell parses either command:
+
+```bash
+python3 collab.py watch --project A --agent copilot-1 \
+  --output-admission-argv '["python3","/absolute/path/validate.py","--strict"]' \
+  --output-admission-timeout 20 \
+  --exec skills/agent-collab/bin/copilot-exec.sh -C /path/to/repo
+```
+
+The validator receives one `collab-watcher-output-admission/1` JSON envelope on
+stdin:
+
+```json
+{
+  "schema": "collab-watcher-output-admission/1",
+  "assignment": {
+    "project": "A",
+    "recipient_agent": "copilot-1",
+    "claim_message_id": "...",
+    "message_id": "...",
+    "idempotency_key": "...",
+    "type": "task",
+    "round": 1,
+    "artifact_ref": "request.json@v1",
+    "refs_json": "{\"artifact\":\"request.json@v1\"}"
+  },
+  "agent_payload": "{...exact JSON string sent to the agent...}",
+  "response": "...exact untrimmed agent stdout..."
+}
+```
+
+Exit `0` admits the original response unchanged. Nonzero exit, timeout, or exec
+failure rejects it through the normal release/redelivery/stall path; no response is
+posted. Validator stdout is never a replacement channel. On rejection, bounded
+stdout/stderr snippets become watcher/stall diagnostics, so validators must print
+concise errors only and must **never echo payloads, artifacts, or responses**.
+Timeouts default to 30 seconds and are capped at 300 seconds.
+
+The packaged launcher safely preserves the JSON argv as a single value:
+
+```bash
+export COLLAB_OUTPUT_ADMISSION_ARGV='["python3","/absolute/path/validate.py"]'
+export COLLAB_OUTPUT_ADMISSION_TIMEOUT=20
+collab-watch.sh copilot A /path/to/repo
+```
+
 The watcher auto-joins the agent as a reviewer (so it gets backfilled any open
 broadcast) and loops until told to stop. Robustness:
 

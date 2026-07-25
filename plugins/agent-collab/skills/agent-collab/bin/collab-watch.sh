@@ -16,6 +16,9 @@
 # (e.g. COLLAB_WATCH_ARGS="--idle-exit" to stop once the queue is empty). Extra Codex
 # exec flags can be passed via COLLAB_CODEX_EXEC_ARGS; by default we request the fast
 # service tier because codex-cli 0.125 rejects the priority tier in this watcher path.
+# A fail-closed validator can be configured safely as one JSON argv value in
+# COLLAB_OUTPUT_ADMISSION_ARGV (with an optional COLLAB_OUTPUT_ADMISSION_TIMEOUT);
+# neither command is evaluated by a shell.
 # Extra Claude flags can be passed via COLLAB_CLAUDE_EXEC_ARGS; Claude always runs in
 # print mode, with non-interactive permissions, no browser, and no saved sessions.
 set -euo pipefail
@@ -74,6 +77,19 @@ if [ "${COLLAB_WATCH_DETACH:-0}" = "1" ]; then
   [ -n "${COLLAB_WATCH_LOG:-}" ] && detach_args+=(--log "$COLLAB_WATCH_LOG")
 fi
 
+admission_args=()
+if [ -n "${COLLAB_OUTPUT_ADMISSION_ARGV:-}" ]; then
+  admission_args=(--output-admission-argv "$COLLAB_OUTPUT_ADMISSION_ARGV")
+  if [ -n "${COLLAB_OUTPUT_ADMISSION_TIMEOUT:-}" ]; then
+    admission_args+=(--output-admission-timeout "$COLLAB_OUTPUT_ADMISSION_TIMEOUT")
+  fi
+elif [ -n "${COLLAB_OUTPUT_ADMISSION_TIMEOUT:-}" ]; then
+  echo "COLLAB_OUTPUT_ADMISSION_TIMEOUT requires COLLAB_OUTPUT_ADMISSION_ARGV" >&2
+  exit 2
+fi
+
 # shellcheck disable=SC2086  # COLLAB_WATCH_ARGS is intentionally word-split
 exec python3 "$BIN" watch --project "$project" --agent "$agent" \
-  ${detach_args[@]+"${detach_args[@]}"} ${COLLAB_WATCH_ARGS:-} --exec "${exec_argv[@]}"
+  ${detach_args[@]+"${detach_args[@]}"} \
+  ${admission_args[@]+"${admission_args[@]}"} \
+  ${COLLAB_WATCH_ARGS:-} --exec "${exec_argv[@]}"
