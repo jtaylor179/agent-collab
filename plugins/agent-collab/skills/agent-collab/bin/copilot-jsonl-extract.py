@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract one final Copilot assistant response from a JSONL transport stream.
+"""Extract the last top-level Copilot response from a JSONL transport stream.
 
 The assistant content is opaque: this validates only Copilot's transport
 envelopes and writes the selected string verbatim. It never parses, normalizes,
@@ -12,7 +12,7 @@ import sys
 
 
 def extract_assistant_content(raw_lines):
-    final_messages = []
+    top_level_messages = []
     for line_number, raw_line in enumerate(raw_lines, 1):
         if not raw_line.strip():
             continue
@@ -43,14 +43,18 @@ def extract_assistant_content(raw_lines):
         # Copilot's final top-level response has neither.
         if tool_requests or data.get("parentToolCallId") is not None:
             continue
-        final_messages.append(data["content"])
+        top_level_messages.append(data["content"])
 
-    if len(final_messages) != 1:
+    if not top_level_messages:
         raise ValueError(
-            "Copilot JSONL must contain exactly one final assistant.message; "
-            f"found {len(final_messages)}"
+            "Copilot JSONL must contain a top-level assistant.message"
         )
-    return final_messages[0]
+    # Agentic Copilot sessions may emit top-level progress messages before the
+    # final answer even with non-streaming JSON output. The subprocess exit code
+    # proves the session completed; transport order defines the final response.
+    # Selecting the last envelope preserves its content byte-for-byte without
+    # concatenating progress text into the collaboration protocol response.
+    return top_level_messages[-1]
 
 
 def main():

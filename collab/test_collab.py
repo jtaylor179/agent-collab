@@ -2445,13 +2445,17 @@ class TestCopilotJsonlExtractor(unittest.TestCase):
         self.assertEqual(out.stdout, b"")
         self.assertIn(b"malformed Copilot JSONL", out.stderr)
 
-    def test_duplicate_assistant_messages_fail_closed(self):
-        record = json.dumps(
-            {"type": "assistant.message", "data": {"content": "one"}})
-        out = self._run((record + "\n" + record + "\n").encode())
-        self.assertEqual(out.returncode, 2)
-        self.assertEqual(out.stdout, b"")
-        self.assertIn(b"found 2", out.stderr)
+    def test_multiple_top_level_messages_select_last_response(self):
+        records = "\n".join(
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": content},
+            })
+            for content in ("progress one", "progress two", "final answer")
+        )
+        out = self._run((records + "\n").encode())
+        self.assertEqual(out.returncode, 0, out.stderr.decode())
+        self.assertEqual(out.stdout, b"final answer")
 
     def test_intermediate_tool_and_subagent_messages_are_not_final(self):
         records = (
