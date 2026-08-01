@@ -2055,6 +2055,69 @@ def _prof(mode="review", **kw):
     return json.dumps(d)
 
 
+class TestArtifactPutIdentity(Base):
+    """`artifact put --by` was the one actor flag that ignored $COLLAB_AGENT.
+
+    Every other identity flag (--agent on start/join/claim/..., --from on
+    post/complete/decide, --by on grant/policy) defaults to the env var, so a
+    session that exports COLLAB_AGENT once can omit it everywhere -- except
+    here, where argparse hard-failed with 'the following arguments are
+    required: --by'.
+    """
+
+    def _cli(self, *args, env_agent=None):
+        import contextlib
+        buf = io.StringIO()
+        old = os.environ.get("COLLAB_AGENT")
+        if env_agent is None:
+            os.environ.pop("COLLAB_AGENT", None)
+        else:
+            os.environ["COLLAB_AGENT"] = env_agent
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main(["--root", self.tmp, *args])
+        finally:
+            if old is None:
+                os.environ.pop("COLLAB_AGENT", None)
+            else:
+                os.environ["COLLAB_AGENT"] = old
+        return rc, buf.getvalue()
+
+    def _artifact_file(self):
+        path = os.path.join(self.tmp, "work.txt")
+        with open(path, "w") as fh:
+            fh.write("payload")
+        return path
+
+    def test_by_defaults_to_collab_agent(self):
+        self.s.start("p", "t", "g", "claude-1")
+        rc, out = self._cli("artifact", "put", "--project", "p",
+                            "--name", "work.txt", "--file", self._artifact_file(),
+                            env_agent="claude-1")
+        self.assertEqual(rc, 0)
+        self.assertIn("work.txt@v1", out)
+        self.assertEqual(self.s.get_artifact("p", "work.txt")[0]["created_by"],
+                         "claude-1")
+
+    def test_explicit_by_still_wins_over_env(self):
+        self.s.start("p", "t", "g", "claude-1")
+        rc, _ = self._cli("artifact", "put", "--project", "p", "--by", "codex-1",
+                          "--name", "work.txt", "--file", self._artifact_file(),
+                          env_agent="claude-1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.s.get_artifact("p", "work.txt")[0]["created_by"],
+                         "codex-1")
+
+    def test_missing_identity_is_a_clean_error_not_an_argparse_crash(self):
+        self.s.start("p", "t", "g", "claude-1")
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc, _ = self._cli("artifact", "put", "--project", "p",
+                              "--name", "work.txt", "--file", self._artifact_file())
+        self.assertEqual(rc, 1)
+        self.assertIn("no author identity", json.loads(err.getvalue())["error"])
+
+
 class TestProfiles(Base):
     """v0.4.2: global named setup profiles (validated JSON objects) so a bare
     `agent-collab` can offer use-last / pick-from-list."""

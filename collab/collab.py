@@ -2396,7 +2396,8 @@ def build_parser():
     ap.add_argument("--project", required=True)
     ap.add_argument("--name", required=True)
     ap.add_argument("--file", required=True)
-    ap.add_argument("--by", required=True)
+    ap.add_argument("--by", default=os.environ.get("COLLAB_AGENT"),
+                    help="author id; defaults to $COLLAB_AGENT")
     ag = asub.add_parser("get")
     ag.add_argument("--project", required=True)
     ag.add_argument("--name", required=True)
@@ -2687,6 +2688,8 @@ def main(argv=None):
             _emit({"heartbeat": args.agent})
         elif cmd == "artifact":
             if args.acmd == "put":
+                if not args.by:
+                    raise CollabError("no author identity: pass --by or set COLLAB_AGENT")
                 with open(args.file, "rb") as fh:
                     data = fh.read()
                 _emit(store.put_artifact(args.project, args.name, data, args.by))
