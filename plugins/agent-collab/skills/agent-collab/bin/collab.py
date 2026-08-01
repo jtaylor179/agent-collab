@@ -1503,6 +1503,11 @@ class Store:
             "root": self.root,
             "state": p["state"],
             "round_budget": p["max_rounds"],
+            # Design R11: disagreement loops are supposed to be "bounded by max_rounds".
+            # round_budget alone never was — nothing read it — so a loop could run past it
+            # silently. Report where the project actually IS against that budget.
+            "current_round": self._current_round(project),
+            "rounds_exhausted": self._rounds_exhausted(project, p),
             "messages": msg_count,
             "participants": [
                 dict(zip(
@@ -1529,6 +1534,28 @@ class Store:
             "approvals": self._approval_status(project),
         }
 
+    def _current_round(self, project):
+        """Highest round reached by any message in the project (0 = nothing sent yet)."""
+        row = self.conn.execute(
+            "SELECT MAX(round) AS r FROM messages WHERE project=? AND round IS NOT NULL",
+            (project,),
+        ).fetchone()
+        return row["r"] or 0
+
+    def _rounds_exhausted(self, project, p=None):
+        """True once the project has run its whole round budget.
+
+        The design doc bounds "infinite disagreement loops" with max_rounds, but nothing
+        ever enforced or surfaced it. This does not hard-block posting — stranding a live
+        project mid-round would be worse than overrunning — it makes the budget visible so
+        `next` can stop saying 'wait' forever and escalate instead (design R9/R11).
+        """
+        p = p or self.get_project(project)
+        budget = p["max_rounds"]
+        if not budget:
+            return False
+        return self._current_round(project) >= budget
+
     def next_action(self, project, agent):
         """The deterministic 'what should I do next?' signal for a self-paced loop.
 
@@ -1544,6 +1571,8 @@ class Store:
           wait     - you're waiting on reviewer(s); nothing for you to do yet
           done     - project converged; advance to the next plan step
           broadcast- you're the initiator but no review_request has gone out yet
+          escalate - the round budget is spent and work is still open; converge or hand
+                     it to a human rather than looping forever (design R9/R11)
 
         `open_threads` in status is NOT used here: `decide` converges a whole project at
         once, so open-thread count is noisy by design and a poor 'am I blocked' signal.
@@ -1562,6 +1591,9 @@ class Store:
             "orphaned_for_you": [f["message_id"] for f in self.in_flight(project, agent)
                                  if f["orphaned"]],
             "latest_review_request": None, "responded": [], "awaiting": [],
+            "current_round": self._current_round(project),
+            "round_budget": p["max_rounds"],
+            "rounds_exhausted": self._rounds_exhausted(project, p),
         }
 
         def result(action, why):
@@ -1604,6 +1636,12 @@ class Store:
                 return result("decide", f"All {len(tasks)} task(s) accepted by trusted "
                               "reviewers — `decide` to converge the plan.")
             summary = ", ".join(f"{n} {s}" for s, n in sorted(by_state.items()))
+            if out["rounds_exhausted"]:
+                return result("escalate",
+                              f"Round budget spent (round {out['current_round']} of "
+                              f"{out['round_budget']}) with the plan still open "
+                              f"({summary}). Converge with `decide --force`, raise the "
+                              "budget deliberately, or escalate — do not keep looping.")
             return result("wait", f"Plan in progress ({summary}) — workers and reviewers "
                           "still finishing. Wait, then re-check.")
 
@@ -1648,6 +1686,15 @@ class Store:
         if offline:
             why += (f" {', '.join(offline)} look offline — a watcher may have died; "
                     "consider (re)launching it, or reclaim if they hold a claim.")
+        # The stop condition the design promised: don't tell a self-paced loop to keep
+        # waiting once the round budget is spent — converge or hand it to the human.
+        if out["rounds_exhausted"]:
+            return result("escalate",
+                          f"Round budget spent (round {out['current_round']} of "
+                          f"{out['round_budget']}) and still {why[0].lower()}{why[1:]} "
+                          "Converge with `decide` (--force if approvers never signed "
+                          "off), raise the budget deliberately, or take it to a human — "
+                          "do not keep looping.")
         return result("wait", why)
 
     def list_projects(self):
@@ -1749,7 +1796,34 @@ class Store:
     def doctor(self, project, agent):
         """Diagnose setup and tell the caller what to do next. Designed so a skill can
         relay the `hints` to the user in plain language. Never raises on a missing
-        project — that's one of the things it checks for."""
+        project — that's one of the things it checks for.
+
+        `project` may be None: "run doctor first" is the standard opening move, and at
+        that point there is usually no project yet. Without one, report the root/identity
+        level (which is where setup actually goes wrong) plus the projects that do exist.
+        """
+        if project is None:
+            out = {
+                "root": self.root, "agent": agent, "project": None,
+                "projects": self.list_projects()["projects"], "hints": [],
+            }
+            h = out["hints"]
+            h.append(f"All agents MUST share COLLAB_ROOT={self.root} (a local-disk path) "
+                     "and each use a DISTINCT agent id.")
+            if not agent:
+                h.append("No agent identity resolved. Set COLLAB_AGENT (e.g. claude-1 for "
+                         "Claude, codex-1 for Codex, copilot-1 for Copilot, cursor-1 for "
+                         "Cursor, antigravity-1 for Antigravity) or pass --agent.")
+            else:
+                h.append(f"Your identity here is '{agent}'. Every OTHER tool must use a "
+                         "different id, or nothing routes.")
+            if not out["projects"]:
+                h.append("No projects exist under this root yet. Start one with `review "
+                         "--project X --file <path>` (a project needs a work product).")
+            else:
+                h.append("Pass --project <name> to diagnose a specific project's "
+                         "participants, roles and pending work.")
+            return out
         exists = self.conn.execute(
             "SELECT * FROM projects WHERE name=?", (project,)
         ).fetchone()
@@ -2484,8 +2558,11 @@ def build_parser():
     s.add_argument("--round", dest="round_", type=int, default=1)
 
     s = sub.add_parser("doctor",
-                       help="diagnose setup + identity and suggest the next step")
-    s.add_argument("--project", required=True)
+                       help="diagnose setup + identity and suggest the next step "
+                            "(--project optional: omit it to check root/identity only)")
+    s.add_argument("--project", default=None,
+                   help="project to diagnose; omit for a root/identity-level check "
+                        "(useful before any project exists)")
     s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
                    help="agent id; defaults to $COLLAB_AGENT")
 

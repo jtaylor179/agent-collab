@@ -81,7 +81,7 @@ join     --project X [--role reviewer|approver|observer]               # default
 projects                                                               # list all (no --project)
 status   --project X
 next     --project X --agent <me>                                      # ONE recommended action for a self-paced loop
-doctor   --project X                                                   # "what's wrong / next?"
+doctor   [--project X]                                                 # "what's wrong / next?" (omit --project to check root+identity before any project exists)
 poll     --project X --agent <me>                                      # peek inbox (no claim)
 claim    --project X [--wait <sec>] [--poll-interval 2]                # returns claim_token + claim_message_id + body
 complete --project X --claim-message <id> --claim-token <tok> --type response (--body <text> | --body-file <f>) \
@@ -126,8 +126,14 @@ converges a whole project at once). Ask `next --project X --agent <me>` instead:
 collapses the board into ONE action — `reclaim` (recover an abandoned claim), `drain`
 (handle your inbox), `decide` (all reviewers answered — converge/rebut), `wait` (waiting
 on reviewer(s); names who and if they're offline), `done` (converged — advance to the
-next step), or `broadcast` (initiator, nothing sent yet). The `/collab-loop` command runs
+next step), `broadcast` (initiator, nothing sent yet), or `escalate` (the round budget is
+spent and work is still open — converge with `decide`, raise `--max-rounds` deliberately,
+or hand it to the human; do NOT keep looping). The `/collab-loop` command runs
 exactly this tick loop under `/loop`.
+
+`status` also reports `current_round` / `round_budget` / `rounds_exhausted`. Note the
+budget is a **stop signal, not a hard block** — posting past it still works, so a live
+project is never stranded mid-round.
 
 **Orchestrated multi-worker plans (interchangeable workers + trusted reviewers).** For a
 plan where MANY interchangeable workers each do a piece and only specific agents are

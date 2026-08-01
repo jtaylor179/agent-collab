@@ -2118,6 +2118,99 @@ class TestArtifactPutIdentity(Base):
         self.assertIn("no author identity", json.loads(err.getvalue())["error"])
 
 
+class TestDoctorWithoutProject(Base):
+    """`doctor` is the standard opening move, but --project was required=True -- so it
+    could not run before any project existed, contradicting its own docstring ("must run
+    even when identity is missing, since diagnosing a missing/duplicate COLLAB_AGENT is
+    one of its jobs")."""
+
+    def _cli(self, *args, env_agent=None):
+        import contextlib
+        buf = io.StringIO()
+        old = os.environ.get("COLLAB_AGENT")
+        if env_agent is None:
+            os.environ.pop("COLLAB_AGENT", None)
+        else:
+            os.environ["COLLAB_AGENT"] = env_agent
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main(["--root", self.tmp, *args])
+        finally:
+            if old is None:
+                os.environ.pop("COLLAB_AGENT", None)
+            else:
+                os.environ["COLLAB_AGENT"] = old
+        return rc, buf.getvalue()
+
+    def test_cli_doctor_runs_with_no_project_at_all(self):
+        rc, out = self._cli("doctor", env_agent="claude-1")
+        self.assertEqual(rc, 0)
+        d = json.loads(out)
+        self.assertIsNone(d["project"])
+        self.assertEqual(d["projects"], [])
+        self.assertTrue(any("no projects exist" in h.lower() for h in d["hints"]))
+
+    def test_no_project_lists_existing_projects(self):
+        self.s.start("A", "t", "g", "claude-1")
+        d = self.s.doctor(None, "claude-1")
+        self.assertEqual([p["project"] for p in d["projects"]], ["A"])
+        self.assertTrue(any("--project" in h for h in d["hints"]))
+
+    def test_no_project_still_flags_missing_identity(self):
+        d = self.s.doctor(None, None)
+        self.assertTrue(any("COLLAB_AGENT" in h for h in d["hints"]))
+
+    def test_project_scoped_doctor_is_unchanged(self):
+        self.s.start("A", "t", "g", "claude-1")
+        d = self.s.doctor("A", "claude-1")
+        self.assertTrue(d["project_exists"])
+        self.assertEqual(d["your_role"], "initiator")
+
+
+class TestRoundBudgetIsReal(Base):
+    """max_rounds was stored and reported as `round_budget` but read by nothing, so the
+    design's "infinite disagreement loops are bounded by max_rounds" was never true --
+    `next` would say 'wait' forever."""
+
+    def _open_round(self, project, round_):
+        """Initiator broadcasts a review_request at `round_`; reviewer stays silent."""
+        self.s.post(project, "claude-1", "broadcast", "review_request",
+                    f"round {round_}", round_=round_)
+
+    def test_status_reports_position_against_the_budget(self):
+        self.s.start("A", "t", "g", "claude-1", max_rounds=3)
+        self.s.join("A", "codex-1", "reviewer")
+        self._open_round("A", 2)
+        st = self.s.status("A")
+        self.assertEqual(st["round_budget"], 3)
+        self.assertEqual(st["current_round"], 2)
+        self.assertFalse(st["rounds_exhausted"])
+
+    def test_next_says_wait_while_budget_remains(self):
+        self.s.start("A", "t", "g", "claude-1", max_rounds=6)
+        self.s.join("A", "codex-1", "reviewer")
+        self._open_round("A", 1)
+        self.assertEqual(self.s.next_action("A", "claude-1")["action"], "wait")
+
+    def test_next_escalates_once_budget_is_spent(self):
+        self.s.start("A", "t", "g", "claude-1", max_rounds=2)
+        self.s.join("A", "codex-1", "reviewer")
+        self._open_round("A", 2)
+        n = self.s.next_action("A", "claude-1")
+        self.assertTrue(n["rounds_exhausted"])
+        self.assertEqual(n["action"], "escalate")
+        self.assertIn("do not keep looping", n["why"])
+
+    def test_exhaustion_never_blocks_posting(self):
+        # Surfacing the budget must not strand a live project mid-round.
+        self.s.start("A", "t", "g", "claude-1", max_rounds=1)
+        self.s.join("A", "codex-1", "reviewer")
+        self._open_round("A", 1)
+        self.assertTrue(self.s.status("A")["rounds_exhausted"])
+        self.s.post("A", "codex-1", "broadcast", "response", "still fine", round_=2)
+        self.assertEqual(self.s.status("A")["current_round"], 2)
+
+
 class TestProfiles(Base):
     """v0.4.2: global named setup profiles (validated JSON objects) so a bare
     `agent-collab` can offer use-last / pick-from-list."""
