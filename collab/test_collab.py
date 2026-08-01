@@ -2309,6 +2309,25 @@ class TestCopilotExecAdapter(unittest.TestCase):
     """Copilot starts on the preferred model/effort defaults and accepts per-run
     overrides without requiring a different watcher command."""
 
+    @staticmethod
+    def _git(repo, *args):
+        import subprocess
+
+        return subprocess.run(
+            ["git", "-C", repo, *args],
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def _create_repo(self, path):
+        os.makedirs(path)
+        self._git(path, "init", "--quiet")
+        self._git(path, "config", "user.name", "Adapter Test")
+        self._git(path, "config", "user.email", "adapter@example.invalid")
+        with open(os.path.join(path, "tracked.txt"), "w") as fh:
+            fh.write("committed\n")
+        self._git(path, "add", "tracked.txt")
+        self._git(path, "commit", "--quiet", "-m", "base")
+
     def _invoke(self, env_overrides=None, extra_args=None):
         import subprocess
 
@@ -2316,6 +2335,8 @@ class TestCopilotExecAdapter(unittest.TestCase):
             os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
             "agent-collab", "skills", "agent-collab", "bin", "copilot-exec.sh")
         with tempfile.TemporaryDirectory(prefix="copilot_adapter_test_") as tmp:
+            repo = os.path.join(tmp, "review-repo")
+            self._create_repo(repo)
             fake = os.path.join(tmp, "copilot")
             with open(fake, "w") as fh:
                 fh.write(
@@ -2334,7 +2355,7 @@ class TestCopilotExecAdapter(unittest.TestCase):
             env.pop("COPILOT_CUSTOM_INSTRUCTIONS", None)
             env.update(env_overrides or {})
             out = subprocess.run(
-                [adapter, "-C", "/tmp/review-repo", *(extra_args or [])],
+                [adapter, "-C", repo, *(extra_args or [])],
                 input="review payload",
                 capture_output=True, text=True, env=env, timeout=10)
         return out
@@ -2352,6 +2373,11 @@ class TestCopilotExecAdapter(unittest.TestCase):
         self.assertEqual(args[args.index("--stream") + 1], "off")
         self.assertEqual(args[args.index("--output-format") + 1], "json")
         self.assertNotIn("--no-custom-instructions", args)
+        self.assertIn("--deny-tool", args)
+        c_values = [
+            args[index + 1] for index, arg in enumerate(args) if arg == "-C"]
+        self.assertEqual(len(c_values), 1)
+        self.assertIn("agent-collab-copilot.", c_values[0])
         self.assertEqual(args[-2:], ["-p", "review payload"])
 
     def test_caller_cannot_override_adapter_transport_flags(self):
@@ -2381,6 +2407,230 @@ class TestCopilotExecAdapter(unittest.TestCase):
         args = self._run({"COPILOT_CUSTOM_INSTRUCTIONS": "0"})
         self.assertIn("--no-custom-instructions", args)
         self.assertEqual(args[args.index("--stream") + 1], "off")
+
+    def test_edit_mode_uses_the_callers_live_repository(self):
+        args = self._run({"COPILOT_READONLY": "0"})
+        self.assertNotIn("--deny-tool", args)
+        c_values = [
+            args[index + 1] for index, arg in enumerate(args) if arg == "-C"]
+        self.assertEqual(len(c_values), 1)
+
+    def test_readonly_snapshot_survives_destructive_shell_commands(self):
+        import subprocess
+
+        adapter = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin", "copilot-exec.sh")
+        with tempfile.TemporaryDirectory(prefix="copilot_adapter_attack_") as tmp:
+            repo = os.path.join(tmp, "source-repo")
+            self._create_repo(repo)
+
+            tracked = os.path.join(repo, "tracked.txt")
+            with open(tracked, "w") as fh:
+                fh.write("staged\n")
+            self._git(repo, "add", "tracked.txt")
+            with open(tracked, "w") as fh:
+                fh.write("staged plus unstaged\n")
+            with open(os.path.join(repo, "staged-only.txt"), "w") as fh:
+                fh.write("staged-only\n")
+            self._git(repo, "add", "staged-only.txt")
+            os.makedirs(os.path.join(repo, "notes"))
+            untracked = os.path.join(repo, "notes", "review.txt")
+            with open(untracked, "w") as fh:
+                fh.write("untracked review evidence\n")
+            odd_untracked_relative = os.path.join(
+                "notes", "line\nand\ttab.txt")
+            with open(os.path.join(repo, odd_untracked_relative), "w") as fh:
+                fh.write("odd filename evidence\n")
+
+            source_head = self._git(repo, "rev-parse", "HEAD")
+            source_status = self._git(repo, "status", "--porcelain=v1")
+            source_cached = self._git(repo, "diff", "--cached", "--binary")
+            source_unstaged = self._git(repo, "diff", "--binary")
+
+            fake = os.path.join(tmp, "copilot")
+            with open(fake, "w") as fh:
+                fh.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, subprocess, sys\n"
+                    "args = sys.argv[1:]\n"
+                    "c_indexes = [i for i, value in enumerate(args) if value == '-C']\n"
+                    "repo = args[c_indexes[-1] + 1]\n"
+                    "def git(*values):\n"
+                    "    return subprocess.run(['git', '-C', repo, *values], "
+                    "check=True, capture_output=True, text=True).stdout\n"
+                    "payload = {\n"
+                    "    'repo': repo,\n"
+                    "    'cwd': os.getcwd(),\n"
+                    "    'head': git('rev-parse', 'HEAD'),\n"
+                    "    'status': git('status', '--porcelain=v1'),\n"
+                    "    'cached': git('diff', '--cached', '--binary'),\n"
+                    "    'unstaged': git('diff', '--binary'),\n"
+                    "    'untracked': open(os.path.join(repo, 'notes', 'review.txt')).read(),\n"
+                    "    'odd_untracked': open(os.path.join(\n"
+                    "        repo, os.environ['ODD_UNTRACKED'])).read(),\n"
+                    "    'remotes': git('remote', '-v'),\n"
+                    "}\n"
+                    "attack = subprocess.run(\n"
+                    "    ['git', '-C', os.environ['ATTACK_REPO'], "
+                    "'reset', '--hard', 'HEAD'],\n"
+                    "    capture_output=True)\n"
+                    "payload['live_attack_returncode'] = attack.returncode\n"
+                    "payload['oldpwd'] = os.environ.get('OLDPWD')\n"
+                    "subprocess.run(['git', '-C', repo, 'reset', '--hard', 'HEAD'], "
+                    "check=True, capture_output=True)\n"
+                    "subprocess.run(['git', '-C', repo, 'clean', '-fdx'], "
+                    "check=True, capture_output=True)\n"
+                    "print(json.dumps({'type': 'assistant.message', "
+                    "'data': {'content': json.dumps(payload)}}))\n")
+            os.chmod(fake, 0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = tmp + os.pathsep + env["PATH"]
+            env["COPILOT_READONLY"] = "1"
+            env["ATTACK_REPO"] = repo
+            env["ODD_UNTRACKED"] = odd_untracked_relative
+            out = subprocess.run(
+                [adapter, "-C", repo],
+                input="review payload",
+                capture_output=True, text=True, env=env, timeout=20,
+            )
+
+            self.assertEqual(out.returncode, 0, out.stderr)
+            observed = json.loads(out.stdout)
+            self.assertNotEqual(observed["repo"], repo)
+            self.assertEqual(
+                os.path.realpath(observed["cwd"]),
+                os.path.realpath(observed["repo"]),
+            )
+            self.assertFalse(os.path.exists(observed["repo"]))
+            self.assertEqual(observed["head"], source_head)
+            self.assertEqual(observed["status"], source_status)
+            self.assertEqual(observed["cached"], source_cached)
+            self.assertEqual(observed["unstaged"], source_unstaged)
+            self.assertEqual(
+                observed["untracked"], "untracked review evidence\n")
+            self.assertEqual(
+                observed["odd_untracked"], "odd filename evidence\n")
+            self.assertEqual(observed["remotes"], "")
+            self.assertNotEqual(observed["live_attack_returncode"], 0)
+            self.assertIsNone(observed["oldpwd"])
+
+            # The fake Copilot reset and cleaned its snapshot. The live source
+            # still has the exact pre-review HEAD, diffs, and untracked evidence.
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), source_head)
+            self.assertEqual(
+                self._git(repo, "status", "--porcelain=v1"), source_status)
+            self.assertEqual(
+                self._git(repo, "diff", "--cached", "--binary"), source_cached)
+            self.assertEqual(
+                self._git(repo, "diff", "--binary"), source_unstaged)
+            with open(untracked) as fh:
+                self.assertEqual(fh.read(), "untracked review evidence\n")
+
+    def test_readonly_rejects_additional_live_directory(self):
+        out = self._invoke(extra_args=["--add-dir", "/tmp/other-source"])
+
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(
+            "does not permit --add-dir",
+            out.stderr,
+        )
+
+    def test_readonly_fails_closed_when_source_changes_during_capture(self):
+        import shutil
+        import subprocess
+
+        adapter = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin", "copilot-exec.sh")
+        with tempfile.TemporaryDirectory(prefix="copilot_adapter_race_") as tmp:
+            repo = os.path.join(tmp, "source-repo")
+            self._create_repo(repo)
+            fake_bin = os.path.join(tmp, "bin")
+            os.makedirs(fake_bin)
+            counter = os.path.join(tmp, "cached-diff-count")
+            marker = os.path.join(tmp, "copilot-started")
+
+            git_wrapper = os.path.join(fake_bin, "git")
+            with open(git_wrapper, "w") as fh:
+                fh.write(
+                    "#!/usr/bin/env python3\n"
+                    "import os, subprocess, sys\n"
+                    "args = sys.argv[1:]\n"
+                    "result = subprocess.run(\n"
+                    "    [os.environ['REAL_GIT'], *args],\n"
+                    "    stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+                    "sys.stdout.buffer.write(result.stdout)\n"
+                    "sys.stderr.buffer.write(result.stderr)\n"
+                    "target = ['diff', '--cached', '--binary', '--full-index', "
+                    "'--no-ext-diff']\n"
+                    "if result.returncode == 0 and args[-len(target):] == target:\n"
+                    "    count_path = os.environ['RACE_COUNTER']\n"
+                    "    try:\n"
+                    "        count = int(open(count_path).read()) + 1\n"
+                    "    except FileNotFoundError:\n"
+                    "        count = 1\n"
+                    "    open(count_path, 'w').write(str(count))\n"
+                    "    if count == 2:\n"
+                    "        open(os.path.join(os.environ['RACE_REPO'], "
+                    "'tracked.txt'), 'w').write('changed during snapshot\\n')\n"
+                    "raise SystemExit(result.returncode)\n")
+            os.chmod(git_wrapper, 0o755)
+
+            fake_copilot = os.path.join(fake_bin, "copilot")
+            with open(fake_copilot, "w") as fh:
+                fh.write(
+                    "#!/usr/bin/env python3\n"
+                    "import os\n"
+                    "open(os.environ['COPILOT_MARKER'], 'w').write('started')\n")
+            os.chmod(fake_copilot, 0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = fake_bin + os.pathsep + env["PATH"]
+            env["REAL_GIT"] = shutil.which("git")
+            env["RACE_COUNTER"] = counter
+            env["RACE_REPO"] = repo
+            env["COPILOT_MARKER"] = marker
+            env["COPILOT_READONLY"] = "1"
+            out = subprocess.run(
+                [adapter, "-C", repo],
+                input="review payload",
+                capture_output=True, text=True, env=env, timeout=20,
+            )
+
+            self.assertEqual(out.returncode, 1, out.stderr)
+            self.assertEqual(out.stdout, "")
+            self.assertIn(
+                "source repository changed while creating the read-only snapshot",
+                out.stderr,
+            )
+            self.assertFalse(os.path.exists(marker))
+            with open(os.path.join(repo, "tracked.txt")) as fh:
+                self.assertEqual(fh.read(), "changed during snapshot\n")
+
+    def test_snapshot_state_rejects_intent_to_add(self):
+        import subprocess
+
+        state_helper = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
+            "agent-collab", "skills", "agent-collab", "bin",
+            "copilot-snapshot-state.py")
+        with tempfile.TemporaryDirectory(prefix="copilot_adapter_ita_") as tmp:
+            repo = os.path.join(tmp, "source-repo")
+            self._create_repo(repo)
+            with open(os.path.join(repo, "intent.txt"), "w") as fh:
+                fh.write("intent-to-add\n")
+            self._git(repo, "add", "-N", "intent.txt")
+
+            out = subprocess.run(
+                [sys.executable, state_helper, repo],
+                capture_output=True, text=True, timeout=10,
+            )
+
+            self.assertEqual(out.returncode, 2)
+            self.assertEqual(out.stdout, "")
+            self.assertIn("does not support intent-to-add", out.stderr)
 
     def test_invalid_custom_instruction_setting_fails_closed(self):
         import subprocess
