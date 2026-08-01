@@ -8,10 +8,14 @@ __pycache__/
 .collab/
 .collab2/
 
-# demo runtime output (recreated by demo/run_*.sh)
-demo/.run/
-demo/.run-watcher/
+# watcher/demo runtime output (recreated by the run scripts). Unanchored so it
+# also catches the copies dropped at the repo root, not just under demo/.
+.run/
+.run-watcher/
 demo/_probe/
+
+# nohup/watcher launch scratch log
+activity.log
 
 # SQLite runtime databases
 *.db
