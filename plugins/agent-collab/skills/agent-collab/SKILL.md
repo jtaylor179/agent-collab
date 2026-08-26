@@ -50,10 +50,12 @@ every call:
   3. newest version under `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (`ls | sort -V | tail -1`)
   4. newest version under `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (same)
 - `COLLAB_ROOT` = the data dir for the bus. **Use a local-disk path** that every
-  participating agent shares; default to `$HOME/.collab` so both sides
-  deterministically land on the same bus. Pass it as `--root "$COLLAB_ROOT"` on every
-  command, or export it once. Avoid a mounted/synced/network folder: SQLite needs file
-  locking, and the CLI will say so clearly if the path can't support it.
+  participating agent shares. The default is the current repository's `.collab/`
+  directory (for direct CLI use: `./.collab`; for `collab-watch.sh`: `<repo-dir>/.collab`).
+  Pass it as `--root "$COLLAB_ROOT"` on every command, or export it once. Set it
+  explicitly only when collaborators intentionally work from different repository roots.
+  Avoid a mounted/synced/network folder: SQLite needs file locking, and the CLI will say
+  so clearly if the path can't support it.
 - Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires `pip install
   cursor-sdk` and `CURSOR_API_KEY`). See `references/cursor-start.md`.
 - Antigravity watcher adapter: `antigravity-exec.sh` beside `collab.py` (requires `agy`
@@ -100,6 +102,7 @@ delete   --project X --yes
 watch    --project X [--output-admission-argv JSON] [--output-admission-timeout S] \
             --exec codex exec -c service_tier=fast                       # hands-off reviewer loop
 reclaim  --project X [--agent <id>] [--message <id>] [--force]         # recover a dead watcher's stranded claim
+retry    --project X --message <id> --agent <id>                       # requeue one stalled delivery after fixing its cause
 policy   --project X [--set any|all|final:<agent-id>]                  # show/set task acceptance policy
 profile  save --name X (--data <json> | --data-file <f|->)            # save a reusable setup profile (global)
 profile  list | show --name X [--use] | delete --name X --yes         # reuse: `show --use` marks it last-used
@@ -120,10 +123,17 @@ already-expired leases (a reportable, scopeable `sweep`). Reclaim is safe if the
 watcher was only wedged: it mints no token, so the zombie's later `complete` is fenced
 out (token mismatch), never a double-post.
 
+**A stalled row is different:** it has exhausted its bounded delivery budget after a
+handler failure and will never redeliver automatically. `status` and `doctor` show the
+exact message id and recipient. Fix the cause first (for example, unavailable Claude
+authentication), then run `retry --project X --message <id> --agent <id>`; this resets
+only that row's delivery budget and mints a fresh token on the next claim.
+
 **Self-paced plans (no manual re-kick).** To advance a multi-step, review-gated plan
 hands-off, don't make the loop interpret `status` (its `open_threads` is noisy — `decide`
 converges a whole project at once). Ask `next --project X --agent <me>` instead: it
-collapses the board into ONE action — `reclaim` (recover an abandoned claim), `drain`
+collapses the board into ONE action — `retry` (recover a stalled delivery after fixing
+its cause), `reclaim` (recover an abandoned claim), `drain`
 (handle your inbox), `decide` (all reviewers answered — converge/rebut), `wait` (waiting
 on reviewer(s); names who and if they're offline), `done` (converged — advance to the
 next step), `broadcast` (initiator, nothing sent yet), or `escalate` (the round budget is
@@ -167,7 +177,7 @@ trusted to accept the work, use the task-queue model (ADR-0001):
 - **Convergence:** `status.tasks` rolls each task up as `todo → claimed → submitted →
   accepted` (per the policy); `status.accept_policy` shows the rule. `decide` is blocked
   until every task is accepted (override with `--force`). `next` for a `worker` returns
-  `do-task`; for the `orchestrator` it returns `broadcast`/`wait`/`reclaim`/`decide`/`done`
+  `do-task`; for the `orchestrator` it returns `broadcast`/`wait`/`retry`/`reclaim`/`decide`/`done`
   off the task roll-up. `/collab-orchestrate` runs the orchestrator tick loop.
 
 Message `--type`: `review_request question task response rebuttal proposal approval decision status heartbeat`
@@ -316,6 +326,7 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 | Agent | Model knob | Default model | Read-only knob (default on) |
 |---|---|---|---|
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
+| `claude-1` | `COLLAB_CLAUDE_EXEC_ARGS` — append `--model <model>` | Claude Code CLI default | Claude launcher uses its non-interactive permission mode |
 | `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` |
 | `cursor-1` | `CURSOR_MODEL` | `composer-2.5` | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
@@ -374,7 +385,7 @@ review mode; ask only if the user wants non-defaults.)
    each **approver** (they review/accept) — mode (a) background, (b) print commands, or
    (c) interactive. An approver's `APPROVED`-first output posts as an `approval`.
 5. Hand off to the orchestrator loop: run `/collab-orchestrate <name>` (or drive it
-   manually with `next --agent <name>` → `broadcast|wait|reclaim|decide|done`). Offer to
+   manually with `next --agent <name>` → `broadcast|wait|retry|reclaim|decide|done`). Offer to
    start it now or let the user come back later.
 
 **After a FRESH setup (either wizard), offer to save it as a profile.** If they say yes,
@@ -517,20 +528,24 @@ agreement theater. Hold yourself and the loop to this:
 - Reference artifacts as `name@version`, never "the latest" — versions are immutable.
 - Keep replies in their thread so the convergence history stays coherent.
 
-## Bringing in Codex / Copilot / Cursor / Antigravity as hands-off reviewers
+## Bringing in Claude / Codex / Copilot / Cursor / Antigravity as hands-off reviewers
 
 Other agents don't have to be babysat. Tell the user they can run a watcher in a
-separate terminal so Codex/Copilot/Cursor/Antigravity pick up review requests automatically:
+separate terminal so Claude/Codex/Copilot/Cursor/Antigravity pick up review requests automatically:
 
 ```bash
 # Launcher (resolves collab.py + adapter paths):
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" codex        X /path/to/repo
+"${COLLAB_BIN%/collab.py}/collab-watch.sh" claude       X /path/to/repo
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" copilot      X /path/to/repo
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" cursor       X /path/to/repo
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" antigravity  X /path/to/repo
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" agy          X /path/to/repo
 
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
+# Claude: prefer the launcher above. It runs `claude auth status` before claims;
+# `COLLAB_CLAUDE_EXEC_ARGS="--model opus"` pins an Opus review when available.
+python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent claude-1  --exec claude --print --permission-mode dontAsk --no-chrome --no-session-persistence
 # Copilot: use the adapter's validated non-streaming JSONL transport:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec "${COLLAB_BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
 # Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
@@ -538,6 +553,12 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 -
 # Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent antigravity-1 --exec "${COLLAB_BIN%/collab.py}/antigravity-exec.sh"
 ```
+
+Claude's launcher and the direct `--exec claude ...` form both preflight
+`claude auth status` before joining or claiming work. If the caller is sandboxed and
+cannot see the host keychain, launch this command from the host-authenticated context.
+Set `COLLAB_CLAUDE_AUTH_PREFLIGHT=0` only for a known nonstandard provider whose status
+command cannot report its credentials.
 
 See `references/watchers.md`, `references/cursor-start.md`, and `references/antigravity-start.md` for details.
 

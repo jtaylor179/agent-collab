@@ -11,7 +11,7 @@ Act as **`antigravity-1`** unless `$COLLAB_AGENT` is set. **Export it first if u
 ## The bus
 
 ```bash
-export COLLAB_ROOT="${COLLAB_ROOT:-$HOME/.collab}"
+export COLLAB_ROOT="${COLLAB_ROOT:-$PWD/.collab}"
 export COLLAB_AGENT=antigravity-1
 # Resolve collab.py (first match wins; cache lookups pick the NEWEST installed version):
 for _p in \

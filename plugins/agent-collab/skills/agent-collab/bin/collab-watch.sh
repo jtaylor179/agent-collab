@@ -10,7 +10,8 @@
 #   collab-watch.sh agy          <project> [repo-dir]
 #
 # It resolves collab.py + the copilot adapter next to itself, defaults COLLAB_ROOT to
-# $HOME/.collab (the shared bus root), runs in [repo-dir] (default: current dir), and
+# <repo-dir>/.collab (the project-local shared bus root), runs in [repo-dir] (default:
+# current dir), and
 # picks the right --exec for the agent (Copilot needs the prompt-as-arg + perms +
 # model; Codex and Claude read stdin). Extra watcher flags can be passed via COLLAB_WATCH_ARGS
 # (e.g. COLLAB_WATCH_ARGS="--idle-exit" to stop once the queue is empty). Extra Codex
@@ -32,8 +33,12 @@ if [ -z "$agent_arg" ] || [ -z "$project" ]; then
   exit 2
 fi
 
-export COLLAB_ROOT="${COLLAB_ROOT:-$HOME/.collab}"
 cd "$repo"
+repo="$PWD"
+# A project-local default works in workspace-sandboxed clients and makes every
+# watcher launched for the same repo deterministic. Set COLLAB_ROOT explicitly
+# only when collaborators intentionally need to share a bus across repo roots.
+export COLLAB_ROOT="${COLLAB_ROOT:-$repo/.collab}"
 
 case "$agent_arg" in
   copilot|copilot-1) agent="copilot-1"; exec_argv=("$WRAP");;
@@ -62,6 +67,26 @@ case "$agent_arg" in
     ;;
   *) echo "unknown agent '$agent_arg' (use 'copilot', 'codex', 'claude', 'cursor', 'antigravity', or 'agy')" >&2; exit 2;;
 esac
+
+# Claude Code can be authenticated through the host keychain while a sandboxed caller
+# cannot see that credential. Check in this exact launcher context BEFORE `watch`
+# joins/claims work; otherwise a deterministic auth failure burns the delivery budget
+# and leaves a blank stalled inbox row. Set COLLAB_CLAUDE_AUTH_PREFLIGHT=0 only for a
+# known nonstandard provider whose `claude auth status` cannot report its credentials.
+if [ "$agent" = "claude-1" ] && [ "${COLLAB_CLAUDE_AUTH_PREFLIGHT:-1}" != "0" ]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "collab-watch: Claude Code is unavailable on PATH." >&2
+    echo "Install Claude Code, or launch this watcher from the authenticated host context. No collab message was claimed." >&2
+    exit 1
+  fi
+  claude_auth_status=""
+  if ! claude_auth_status="$(claude auth status 2>&1)"; then
+    echo "collab-watch: Claude authentication is unavailable in this execution context." >&2
+    [ -n "$claude_auth_status" ] && printf '%s\n' "$claude_auth_status" >&2
+    echo "Run 'claude auth login' in this context, or launch the watcher from a host context that can access the Claude Code keychain. No collab message was claimed." >&2
+    exit 1
+  fi
+fi
 
 echo "collab-watch: agent=$agent project=$project root=$COLLAB_ROOT repo=$PWD exec=${exec_argv[*]}" >&2
 

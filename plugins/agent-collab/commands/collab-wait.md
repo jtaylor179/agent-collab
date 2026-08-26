@@ -8,7 +8,7 @@ agent's review or reply) rather than checking manually. Use the `agent-collab` s
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` (default `$HOME/.collab`). Determine the project name from $ARGUMENTS;
+   `COLLAB_ROOT` (default `./.collab` in the current repository). Determine the project name from $ARGUMENTS;
    if not given, run `projects` and ask which one. Use your identity (`$COLLAB_AGENT`,
    else `claude-1`).
 2. Tell the user you'll wait, for how long, and that this ties up the session until a

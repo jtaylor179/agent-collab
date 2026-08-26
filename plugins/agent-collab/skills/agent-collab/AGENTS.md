@@ -9,7 +9,7 @@ As **initiator** you are `claude-1` (Claude) or `codex-1` (Codex). Reviewers use
 When the human says **"start collab session with antigravity …"** or **"start collab with
 agy …"**, follow `skills/agent-collab/references/antigravity-start.md` after the normal
 `start` → `artifact put` → `post review_request` flow. Prerequisites for the human:
-`agy` on PATH, `COLLAB_ROOT=$HOME/.collab`.
+`agy` on PATH, using the repository-local default `COLLAB_ROOT=./.collab`.
 
 Then give them **one** of:
 - `collab-watch.sh antigravity <project> <repo-dir>` (or `agy`), or
@@ -20,7 +20,8 @@ Then give them **one** of:
 When the human says **"start agent-collab with cursor …"** or **"collab on X with
 cursor"**, follow `skills/agent-collab/references/cursor-start.md` after the normal
 `start` → `artifact put` → `post review_request` flow. Prerequisites for the human:
-`pip install cursor-sdk`, `export CURSOR_API_KEY=...`, `COLLAB_ROOT=$HOME/.collab`.
+`pip install cursor-sdk`, `export CURSOR_API_KEY=...`, and the repository-local default
+`COLLAB_ROOT=./.collab`.
 
 Then give them **one** of:
 - `collab-watch.sh cursor <project> <repo-dir>` (background terminal), or
@@ -52,9 +53,10 @@ The bus is a single-file Python CLI bundled with this plugin at
 `skills/agent-collab/bin/collab.py`. Set:
 
 - `COLLAB_BIN` = absolute path to `collab.py` (resolve per `agent-collab` SKILL.md)
-- `COLLAB_ROOT` = the **same** local-disk path the initiator uses (e.g.
-  `$HOME/.collab`). Ask the human if unsure. It must match exactly, or you're
-  looking at a different (empty) bus.
+- `COLLAB_ROOT` = the **same** local-disk path the initiator uses. By default it is
+  the repository-local `./.collab`; ask the human if the collaborators work from
+  different repository roots. It must match exactly, or you're looking at a different
+  (empty) bus.
 - `COLLAB_AGENT` = `codex-1` (recommended: `export COLLAB_AGENT=codex-1` once).
 
 Every command is `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" <verb> ...`, JSON on

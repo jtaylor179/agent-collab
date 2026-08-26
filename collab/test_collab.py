@@ -8,16 +8,25 @@ and stale-worker fencing (claim_token).
 import io
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from collab import (Store, CollabError, watch, _bind_payload, _agent_payload,
-                    _validate_profile_data, main)
+                    _validate_profile_data, build_parser, main)
 
-FAKE_AGENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
+COLLAB_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(COLLAB_DIR)
+PLUGIN_BIN = os.path.join(
+    REPO_ROOT, "plugins", "agent-collab", "skills", "agent-collab", "bin")
+FAKE_AGENT = os.path.join(COLLAB_DIR, "fake_agent.py")
+WATCH_LAUNCHER = os.path.join(PLUGIN_BIN, "collab-watch.sh")
+LEGACY_SCHEMA = os.path.join(COLLAB_DIR, "fixtures", "schema-pre-orchestrated.sql")
 
 
 class Base(unittest.TestCase):
@@ -31,6 +40,95 @@ class Base(unittest.TestCase):
     def fresh_store(self):
         """A second connection to the same root (simulates another process)."""
         return Store(self.tmp)
+
+
+class TestStoreMigrations(unittest.TestCase):
+    """Old project databases are durable user data, so migrations are a release
+    contract rather than an implementation detail."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="collab_migration_")
+        self.db_path = os.path.join(self.tmp, "collab.db")
+
+    def _install_legacy_fixture(self):
+        with open(LEGACY_SCHEMA, encoding="utf-8") as fh:
+            schema = fh.read()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.executescript(schema)
+        finally:
+            conn.close()
+
+    def test_pre_orchestrated_database_upgrades_and_backfills(self):
+        self._install_legacy_fixture()
+
+        store = Store(self.tmp)
+        try:
+            project_cols = {
+                r["name"] for r in store.conn.execute("PRAGMA table_info(projects)")}
+            inbox_cols = {
+                r["name"] for r in store.conn.execute("PRAGMA table_info(inbox)")}
+            self.assertIn("accept_policy", project_cols)
+            self.assertIn("done_seq", inbox_cols)
+            self.assertEqual(store.get_project("legacy")["accept_policy"], "any")
+            done = store.conn.execute(
+                "SELECT done_seq FROM inbox WHERE message_id='legacy-message' "
+                "AND recipient='codex-1'").fetchone()
+            self.assertEqual(done["done_seq"], 0)
+        finally:
+            store.close()
+
+    def test_two_processes_can_race_the_same_legacy_migration(self):
+        self._install_legacy_fixture()
+        code = (
+            "import sys; "
+            f"sys.path.insert(0, {COLLAB_DIR!r}); "
+            "from collab import Store; "
+            "s=Store(sys.argv[1]); s.close()"
+        )
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, self.tmp],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for _ in range(2)
+        ]
+        results = [p.communicate(timeout=30) + (p.returncode,) for p in procs]
+        self.assertEqual(
+            [r[2] for r in results], [0, 0],
+            "\n".join(r[1] for r in results if r[1]))
+
+        store = Store(self.tmp)
+        try:
+            self.assertIn(
+                "accept_policy",
+                {r["name"] for r in store.conn.execute(
+                    "PRAGMA table_info(projects)")})
+            self.assertIn(
+                "done_seq",
+                {r["name"] for r in store.conn.execute(
+                    "PRAGMA table_info(inbox)")})
+        finally:
+            store.close()
+
+    def test_wal_failure_falls_back_to_delete_journal(self):
+        real_connect = sqlite3.connect
+
+        class WalFails(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
+                    raise sqlite3.OperationalError("WAL unavailable")
+                return super().execute(sql, *args, **kwargs)
+
+        def connect(*args, **kwargs):
+            return real_connect(*args, factory=WalFails, **kwargs)
+
+        with mock.patch("collab.sqlite3.connect", side_effect=connect):
+            store = Store(self.tmp)
+        try:
+            mode = store.conn.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode.lower(), "delete")
+        finally:
+            store.close()
 
 
 class TestConvergenceFlow(Base):
@@ -411,6 +509,41 @@ class TestWatcher(Base):
         self.assertEqual(responses[0]["to_agent"], "claude-1")  # reply-to-sender
         self.assertEqual(len(s.poll("A", "codex-1")), 0)        # inbox drained
 
+    def test_direct_claude_watch_preflights_before_join_or_claim(self):
+        """The direct CLI form must not burn a delivery when its keychain is hidden."""
+        s = self.s
+        s.start("A", "queue schema", "agree", "codex-1")
+        s.post("A", "codex-1", "claude-1", "review_request", "review", round_=1)
+        failed_status = subprocess.CompletedProcess(
+            ["claude", "auth", "status"], 1,
+            stdout=b'{"loggedIn":false}', stderr=b"")
+
+        with mock.patch("subprocess.run", return_value=failed_status):
+            with self.assertRaisesRegex(CollabError, "Claude authentication is unavailable"):
+                watch(s, "A", "claude-1", ["claude", "--print"], once=True,
+                      log_fh=self._devnull())
+
+        self.assertEqual(len(s.poll("A", "claude-1")), 1)
+        self.assertNotIn(
+            "claude-1", {p["agent_id"] for p in s.participants("A")})
+
+    def test_direct_claude_watch_allows_explicit_nonstandard_auth_bypass(self):
+        s = self.s
+        s.start("A", "queue schema", "agree", "codex-1")
+        s.post("A", "codex-1", "claude-1", "review_request", "review", round_=1)
+
+        with mock.patch.dict(os.environ, {"COLLAB_CLAUDE_AUTH_PREFLIGHT": "0"}):
+            with mock.patch("subprocess.run") as auth_status:
+                with mock.patch(
+                        "collab._run_agent_with_heartbeat",
+                        return_value=(0, "review complete", "")):
+                    n = watch(s, "A", "claude-1", ["claude", "--print"],
+                              once=True, log_fh=self._devnull())
+
+        self.assertEqual(n, 1)
+        auth_status.assert_not_called()
+        self.assertEqual(len(s.poll("A", "claude-1")), 0)
+
     def test_watch_preserves_agent_stdout_without_trimming(self):
         s = self.s
         s.start("A", "exact output", "preserve it", "claude-1")
@@ -623,6 +756,30 @@ class TestWatcherHardening(Base):
         review_thread = [m["thread_id"] for m in s.log("A")
                          if m["type"] == "review_request"][0]
         self.assertEqual(st["open_threads"], [review_thread])
+
+    def test_nonzero_agent_diagnostic_includes_bounded_stdout_and_stderr(self):
+        """Claude prints auth failures to stdout. A watcher that records only stderr
+        turns the actionable error into a blank five-delivery stall."""
+        s = self._setup_review()
+        command = [
+            sys.executable, "-c",
+            "import sys; "
+            "sys.stdout.write('Not logged in - use host keychain'); "
+            "sys.stderr.write('auth preflight failed'); "
+            "sys.exit(1)",
+        ]
+        log = io.StringIO()
+
+        n = watch(
+            s, "A", "codex-1", command, once=True, lease_min=10,
+            max_deliveries=1, log_fh=log)
+
+        self.assertEqual(n, 0)
+        self.assertIn("stdout: Not logged in", log.getvalue())
+        self.assertIn("stderr: auth preflight failed", log.getvalue())
+        audit = [m for m in s.log("A") if m["type"] == "status"][-1]["body"]
+        self.assertIn("stdout: Not logged in", audit)
+        self.assertIn("stderr: auth preflight failed", audit)
 
     def test_mark_stalled_is_fenced_by_token(self):
         """Codex finding #1: a stale worker must not stall the current owner's row."""
@@ -1011,22 +1168,25 @@ class TestVersionConsistency(unittest.TestCase):
     bumped, the others left behind). Skips when run outside the repo tree."""
 
     def test_manifest_versions_agree(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = REPO_ROOT
         claude = os.path.join(root, "plugins/agent-collab/.claude-plugin/plugin.json")
         codex = os.path.join(root, "plugins/agent-collab/.codex-plugin/plugin.json")
         market = os.path.join(root, ".claude-plugin/marketplace.json")
         if not (os.path.exists(claude) and os.path.exists(codex)
                 and os.path.exists(market)):
             self.skipTest("manifests not present (running outside the repo tree)")
-        cv = json.load(open(claude))["version"]
-        xv = json.load(open(codex))["version"]
-        mv = json.load(open(market))["plugins"][0]["version"]
+        with open(claude, encoding="utf-8") as fh:
+            cv = json.load(fh)["version"]
+        with open(codex, encoding="utf-8") as fh:
+            xv = json.load(fh)["version"]
+        with open(market, encoding="utf-8") as fh:
+            mv = json.load(fh)["plugins"][0]["version"]
         self.assertEqual(
             {cv, xv, mv}, {cv},
             f"manifest version drift: claude={cv} codex={xv} marketplace={mv}")
 
     def test_bundled_cli_copies_match_canonical(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = REPO_ROOT
         canonical = os.path.join(root, "collab", "collab.py")
         bundled = (
             os.path.join(
@@ -1044,9 +1204,19 @@ class TestVersionConsistency(unittest.TestCase):
                     fh.read(), expected,
                     f"bundled collab.py drifted from {canonical}")
 
+    def test_release_guard_checks_versions_and_packaged_content(self):
+        import importlib.util
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        path = os.path.join(REPO_ROOT, "check_version.py")
+        if not os.path.exists(path):
+            self.skipTest("release guard not present")
+        spec = importlib.util.spec_from_file_location("agent_collab_check_version", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        versions = module.collect()
+        self.assertEqual(len(set(versions.values())), 1, versions)
+        self.assertEqual(module.content_drift(), [])
 
 
 class TestPresenceAndInbox(Base):
@@ -1384,6 +1554,13 @@ class TestInFlightAndReclaim(Base):
         c = s.claim("A", "codex-1")
         return s, c
 
+    def _stalled(self):
+        s, claimed = self._claimed()
+        s.mark_stalled(
+            "A", claimed["claim_message_id"], "codex-1",
+            claimed["claim_token"])
+        return s, claimed
+
     def test_status_surfaces_in_flight_claim(self):
         s, c = self._claimed()
         st = s.status("A")
@@ -1456,6 +1633,45 @@ class TestInFlightAndReclaim(Base):
                         "response", "fresh work", round_=1)
         self.assertFalse(ok["duplicate"])
 
+    def test_retry_stalled_requeues_exact_row_and_resets_delivery_budget(self):
+        s, stalled = self._stalled()
+        s.conn.execute(
+            "UPDATE inbox SET deliveries=5 WHERE message_id=? AND recipient=?",
+            (stalled["claim_message_id"], "codex-1"))
+
+        result = s.retry_stalled(
+            "A", stalled["claim_message_id"], "codex-1")
+
+        self.assertEqual(result["retried"], 1)
+        self.assertEqual(result["message_id"], stalled["claim_message_id"])
+        row = s.conn.execute(
+            "SELECT status, claimed_by, claim_token, leased_until, deliveries "
+            "FROM inbox WHERE message_id=? AND recipient=?",
+            (stalled["claim_message_id"], "codex-1")).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNone(row["claimed_by"])
+        self.assertIsNone(row["claim_token"])
+        self.assertIsNone(row["leased_until"])
+        self.assertEqual(row["deliveries"], 0)
+        self.assertEqual(s.status("A")["stalled"], [])
+        self.assertIsNotNone(s.claim("A", "codex-1"))
+
+    def test_retry_stalled_requires_an_exact_stalled_row(self):
+        s, stalled = self._stalled()
+        with self.assertRaises(CollabError):
+            s.retry_stalled("A", "missing", "codex-1")
+        with self.assertRaises(CollabError):
+            s.retry_stalled("A", stalled["claim_message_id"], "copilot-1")
+
+    def test_doctor_surfaces_stalled_retry_command(self):
+        s, stalled = self._stalled()
+        doc = s.doctor("A", "codex-1")
+        self.assertEqual(
+            doc["stalled_for_you"], [stalled["claim_message_id"]])
+        self.assertTrue(any(
+            "retry --project A" in hint and "--agent codex-1" in hint
+            for hint in doc["hints"]))
+
 
 class TestNextAction(Base):
     """`next` collapses the board into ONE recommended action so a self-paced loop
@@ -1521,6 +1737,22 @@ class TestNextAction(Base):
         nx = s.next_action("A", "codex-1")
         self.assertEqual(nx["action"], "reclaim")
         self.assertEqual(nx["orphaned_for_you"], [c["claim_message_id"]])
+
+    def test_retry_takes_priority_when_work_is_stalled(self):
+        s = self.s
+        s.start("A", "t", "g", "claude-1")
+        s.join("A", "codex-1")
+        s.post("A", "claude-1", "codex-1", "review_request", "rev", round_=1)
+        claimed = s.claim("A", "codex-1")
+        s.mark_stalled(
+            "A", claimed["claim_message_id"], "codex-1",
+            claimed["claim_token"])
+
+        nx = s.next_action("A", "codex-1")
+
+        self.assertEqual(nx["action"], "retry")
+        self.assertEqual(nx["stalled_for_you"], [claimed["claim_message_id"]])
+        self.assertIn("retry --project A", nx["why"])
 
     def test_done_when_converged(self):
         s = self._setup(("codex-1",))
@@ -1598,6 +1830,19 @@ class TestOrchestratedPlan(Base):
         s.claim("P", "w1")
         s.reclaim("P", force=True)         # orchestrator knows w1 is dead
         self.assertIsNotNone(s.claim("P", "w2"))  # w2 can now steal it
+
+    def test_retry_stalled_task_reopens_it_to_the_worker_pool(self):
+        s = self._plan()
+        tid = self._post_task(s)
+        claimed = s.claim("P", "w1")
+        self.assertIsNone(s.claim("P", "w2"))
+        s.mark_stalled("P", tid, "w1", claimed["claim_token"])
+
+        s.retry_stalled("P", tid, "w1")
+
+        stolen = s.claim("P", "w2")
+        self.assertIsNotNone(stolen)
+        self.assertEqual(stolen["claim_message_id"], tid)
 
     # --- trusted-reviewer gate (FR2) --------------------------------------------
     def test_only_approver_can_accept(self):
@@ -2461,6 +2706,238 @@ class TestProfiles(Base):
         self.assertEqual(self.s.list_profiles()["count"], 0)
 
 
+class TestDocumentedCLIContract(unittest.TestCase):
+    """SKILL.md tells agents not to probe --help, so its fenced signatures are part
+    of the executable contract and must stay aligned with argparse."""
+
+    @staticmethod
+    def _all_options(parser):
+        import argparse
+
+        options = set()
+        for action in parser._actions:
+            options.update(action.option_strings)
+            if isinstance(action, argparse._SubParsersAction):
+                for child in action.choices.values():
+                    options.update(TestDocumentedCLIContract._all_options(child))
+        return options
+
+    def test_fenced_reference_mentions_only_real_verbs_and_flags(self):
+        import argparse
+        import re
+
+        skill = os.path.join(
+            REPO_ROOT, "plugins", "agent-collab", "skills", "agent-collab",
+            "SKILL.md")
+        with open(skill, encoding="utf-8") as fh:
+            text = fh.read()
+        match = re.search(
+            r"## Command reference .*?\n.*?```\n(.*?)\n```", text, re.DOTALL)
+        self.assertIsNotNone(match, "SKILL.md command reference fence not found")
+        block = match.group(1)
+
+        parser = build_parser()
+        subparsers = next(
+            a for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction))
+        documented_verbs = {
+            line.split()[0]
+            for line in block.splitlines()
+            if line and not line[0].isspace() and not line.startswith("#")
+        }
+        self.assertEqual(
+            documented_verbs - set(subparsers.choices), set(),
+            "SKILL.md documents a verb argparse does not provide")
+        documented_flags = set(re.findall(r"(?<![\w])--[a-z][a-z-]*", block))
+        self.assertEqual(
+            documented_flags - self._all_options(parser), set(),
+            "SKILL.md documents a flag argparse does not provide")
+
+    def test_documented_signature_examples_parse(self):
+        examples = (
+            ["review", "--project", "P", "--file", "work.md", "--focus", "tests"],
+            ["start", "--project", "P", "--max-rounds", "6"],
+            ["artifact", "put", "--project", "P", "--name", "work.md",
+             "--file", "work.md", "--by", "codex-1"],
+            ["artifact", "get", "--project", "P", "--name", "work.md",
+             "--version", "1", "--out", "copy.md"],
+            ["post", "--project", "P", "--type", "review_request", "--round", "1",
+             "--artifact", "work.md@v1", "--body", "review"],
+            ["join", "--project", "P", "--role", "reviewer"],
+            ["projects"],
+            ["status", "--project", "P"],
+            ["next", "--project", "P", "--agent", "codex-1"],
+            ["doctor", "--project", "P"],
+            ["poll", "--project", "P", "--agent", "codex-1"],
+            ["claim", "--project", "P", "--wait", "1", "--poll-interval", "0.1"],
+            ["complete", "--project", "P", "--claim-message", "M",
+             "--claim-token", "T", "--type", "response", "--body", "done"],
+            ["ack", "--project", "P", "--message", "M", "--claim-token", "T"],
+            ["release", "--project", "P", "--message", "M", "--claim-token", "T"],
+            ["grant", "--project", "P", "--by", "owner", "--agent", "reviewer",
+             "--role", "approver"],
+            ["extend", "--project", "P", "--message", "M", "--claim-token", "T",
+             "--lease-min", "10"],
+            ["decide", "--project", "P", "--thread", "T", "--body", "done"],
+            ["log", "--project", "P", "--since", "1", "--follow"],
+            ["delete", "--project", "P", "--yes"],
+            ["watch", "--project", "P", "--agent", "codex-1",
+             "--exec", "/bin/cat"],
+            ["reclaim", "--project", "P", "--agent", "codex-1", "--force"],
+            ["retry", "--project", "P", "--message", "M", "--agent", "codex-1"],
+            ["policy", "--project", "P", "--set", "all"],
+            ["profile", "save", "--name", "team", "--data", "{}"],
+            ["profile", "list"],
+            ["profile", "show", "--name", "team", "--use"],
+            ["profile", "delete", "--name", "team", "--yes"],
+        )
+        parser = build_parser()
+        for argv in examples:
+            with self.subTest(argv=argv):
+                parser.parse_args(argv)
+
+
+class TestCollabWatchLauncher(unittest.TestCase):
+    """Contract tests for the shell launcher: root selection, aliases, Claude auth
+    preflight, and the exact argv passed to the watcher."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="collab_launcher_")
+        self.repo = os.path.join(self.tmp, "repo")
+        self.fake_bin = os.path.join(self.tmp, "bin")
+        self.capture = os.path.join(self.tmp, "capture.txt")
+        os.makedirs(self.repo)
+        os.makedirs(self.fake_bin)
+        self._write_executable(
+            "python3",
+            """#!/bin/sh
+{
+  printf 'ROOT=%s\n' "$COLLAB_ROOT"
+  printf 'PWD=%s\n' "$PWD"
+  for arg in "$@"; do printf 'ARG=%s\n' "$arg"; done
+} > "$COLLAB_CAPTURE"
+""")
+        self._write_executable(
+            "claude",
+            """#!/bin/sh
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ "${FAKE_CLAUDE_AUTH:-ok}" = "fail" ]; then
+    printf '%s\n' '{"loggedIn":false,"authMethod":"none"}'
+    exit 1
+  fi
+  printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai"}'
+  exit 0
+fi
+exit 0
+""")
+
+    def _write_executable(self, name, body):
+        path = os.path.join(self.fake_bin, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+
+    def _env(self, **updates):
+        env = dict(os.environ)
+        for key in (
+                "COLLAB_ROOT", "COLLAB_WATCH_ARGS", "COLLAB_WATCH_DETACH",
+                "COLLAB_WATCH_LOG", "COLLAB_CLAUDE_EXEC_ARGS",
+                "COLLAB_CODEX_EXEC_ARGS", "COLLAB_CLAUDE_AUTH_PREFLIGHT"):
+            env.pop(key, None)
+        env.update({
+            "PATH": self.fake_bin + os.pathsep + env.get("PATH", ""),
+            "COLLAB_CAPTURE": self.capture,
+        })
+        env.update(updates)
+        return env
+
+    def _run(self, agent, repo=None, **env):
+        if os.path.exists(self.capture):
+            os.unlink(self.capture)
+        return subprocess.run(
+            [WATCH_LAUNCHER, agent, "P", repo or self.repo],
+            capture_output=True, text=True, env=self._env(**env), timeout=15)
+
+    def _captured(self):
+        with open(self.capture, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        values = {"args": []}
+        for line in lines:
+            key, value = line.split("=", 1)
+            if key == "ARG":
+                values["args"].append(value)
+            else:
+                values[key.lower()] = value
+        return values
+
+    def test_root_defaults_to_resolved_repo_and_explicit_root_wins(self):
+        nested = os.path.join(self.repo, "nested")
+        os.makedirs(nested)
+        repo_arg = os.path.join(nested, "..") + os.sep
+
+        out = self._run("codex", repo=repo_arg)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        got = self._captured()
+        self.assertEqual(got["root"], os.path.join(self.repo, ".collab"))
+        self.assertEqual(got["pwd"], self.repo)
+
+        custom = os.path.join(self.tmp, "shared-bus")
+        out = self._run("codex", COLLAB_ROOT=custom)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self._captured()["root"], custom)
+
+    def test_agent_aliases_map_to_exact_watcher_exec_argv(self):
+        cases = {
+            "copilot": [os.path.join(PLUGIN_BIN, "copilot-exec.sh")],
+            "codex": ["codex", "exec", "-c", "service_tier=fast"],
+            "claude": [
+                "claude", "--print", "--permission-mode", "dontAsk",
+                "--no-chrome", "--no-session-persistence"],
+            "cursor": [os.path.join(PLUGIN_BIN, "cursor-exec.sh")],
+            "agy": [os.path.join(PLUGIN_BIN, "antigravity-exec.sh")],
+        }
+        for alias, expected_exec in cases.items():
+            with self.subTest(alias=alias):
+                out = self._run(alias)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                args = self._captured()["args"]
+                marker = args.index("--exec")
+                self.assertEqual(args[marker + 1:], expected_exec)
+
+    def test_claude_auth_failure_stops_before_the_bus_can_be_claimed(self):
+        out = self._run("claude", FAKE_CLAUDE_AUTH="fail")
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(self.capture))
+        self.assertIn(
+            "Claude authentication is unavailable in this execution context",
+            out.stderr)
+        self.assertIn('"loggedIn":false', out.stderr)
+        self.assertIn("No collab message was claimed", out.stderr)
+
+    def test_claude_auth_preflight_can_be_explicitly_bypassed(self):
+        out = self._run(
+            "claude", FAKE_CLAUDE_AUTH="fail", COLLAB_CLAUDE_AUTH_PREFLIGHT="0")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(os.path.exists(self.capture))
+
+    def test_missing_claude_binary_stops_before_the_bus_can_be_claimed(self):
+        os.unlink(os.path.join(self.fake_bin, "claude"))
+        out = self._run(
+            "claude", PATH=self.fake_bin + os.pathsep + "/usr/bin:/bin")
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(self.capture))
+        self.assertIn("Claude Code is unavailable on PATH", out.stderr)
+        self.assertIn("Install Claude Code", out.stderr)
+
+    def test_missing_repo_fails_before_watcher_start(self):
+        out = self._run("codex", repo=os.path.join(self.tmp, "missing"))
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(self.capture))
+
+
 class TestCopilotExecAdapter(unittest.TestCase):
     """Copilot starts on the preferred model/effort defaults and accepts per-run
     overrides without requiring a different watcher command."""
@@ -2900,6 +3377,73 @@ class TestCopilotJsonlExtractor(unittest.TestCase):
                 self.assertEqual(out.stdout, b"")
 
 
+class TestCrossProcessFencing(Base):
+    """The production topology is multiple processes sharing SQLite. Pin the two
+    terminal races the protocol relies on instead of testing them only in-process."""
+
+    def _cli(self, *args, timeout=30):
+        return subprocess.run(
+            [sys.executable, os.path.join(COLLAB_DIR, "collab.py"),
+             "--root", self.tmp, *args],
+            capture_output=True, text=True, timeout=timeout)
+
+    def test_reclaim_fences_a_stale_completion_from_another_process(self):
+        self.s.start("P", "t", "g", "claude-1")
+        self.s.join("P", "codex-1")
+        posted = self.s.post(
+            "P", "claude-1", "codex-1", "review_request", "review", round_=1)
+        stale = self.s.claim("P", "codex-1")
+        self.s.reclaim("P", force=True)
+        current = self.s.claim("P", "codex-1")
+
+        out = self._cli(
+            "complete", "--project", "P", "--from", "codex-1",
+            "--claim-message", stale["claim_message_id"],
+            "--claim-token", stale["claim_token"], "--type", "response",
+            "--round", "1", "--body", "zombie response")
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("claim_token mismatch", out.stderr)
+        self.s.complete(
+            "P", "codex-1", current["claim_message_id"],
+            current["claim_token"], "response", "fresh response", round_=1)
+        responses = [m for m in self.s.log("P") if m["type"] == "response"]
+        self.assertEqual([m["body"] for m in responses], ["fresh response"])
+        self.assertEqual(posted["message_id"], stale["claim_message_id"])
+
+    def test_decide_closes_claim_while_watcher_process_is_running(self):
+        self.s.start("P", "t", "g", "claude-1")
+        self.s.join("P", "codex-1")
+        request = self.s.post(
+            "P", "claude-1", "codex-1", "review_request", "review", round_=1)
+        agent = (
+            "import sys,time; sys.stdin.read(); time.sleep(1); "
+            "sys.stdout.write('late review')"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(COLLAB_DIR, "collab.py"),
+             "--root", self.tmp, "watch", "--project", "P",
+             "--agent", "codex-1", "--once", "--exec",
+             sys.executable, "-c", agent],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 10
+        while time.time() < deadline and not self.s.in_flight("P", "codex-1"):
+            time.sleep(0.05)
+        self.assertTrue(self.s.in_flight("P", "codex-1"))
+
+        self.s.decide(
+            "P", "claude-1", "close while reviewer runs",
+            thread_id=request["message_id"])
+        stdout, stderr = proc.communicate(timeout=15)
+
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertIn('"processed": 0', stdout)
+        self.assertIn("thread closed by decision", stderr)
+        self.assertEqual(
+            [m for m in self.s.log("P") if m["type"] == "response"], [])
+        self.assertEqual(self.s.status("P")["open_threads"], [])
+
+
 class TestDetachedWatcher(Base):
     """v0.4.5: `watch --detach` must SPAWN (fork+exec, new session), not continue in a
     forked child. The old double-fork daemonize died on a signal the moment the forked
@@ -2950,3 +3494,29 @@ def _read_log(path):
             return fh.read()
     except OSError:
         return "(no log file)"
+
+
+class TestTestModuleEntrypoint(unittest.TestCase):
+    def test_unittest_main_guard_is_the_last_top_level_statement(self):
+        import ast
+
+        with open(__file__, encoding="utf-8") as fh:
+            module = ast.parse(fh.read())
+
+        def is_main_guard(node):
+            return (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__")
+
+        guards = [node for node in module.body if is_main_guard(node)]
+        self.assertEqual(len(guards), 1)
+        self.assertIs(
+            module.body[-1], guards[0],
+            "placing unittest.main() above test classes makes direct execution "
+            "silently skip every class below it")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

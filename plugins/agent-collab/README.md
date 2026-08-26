@@ -28,8 +28,8 @@ not agreement theater. The human stops being the message bus.
 
 ## Typical flow (slash commands)
 
-Set `COLLAB_AGENT` (claude-1 / codex-1) and `COLLAB_ROOT=$HOME/.collab` once per
-terminal, then:
+Set `COLLAB_AGENT` (claude-1 / codex-1). The default `COLLAB_ROOT` is the current
+repository's `.collab/` directory, then:
 
 1. **Claude:** `/collab-review ./spec.md` — snapshots the file, broadcasts a review
    request, and offers to wait.
@@ -47,10 +47,11 @@ Each agent needs a **distinct** id and they must share **one local-disk** bus:
 - Set `COLLAB_AGENT` per environment — `claude-1` in Claude, `codex-1` in Codex. Two
   agents sharing one id is the #1 setup mistake: nothing routes and "check" finds
   nothing. (`doctor` detects this.)
-- Set `COLLAB_ROOT` to the same local-disk path in every agent, e.g.
-  `$HOME/.collab` — one shared root for all your projects, which are namespaced by name
-  (`--project`). A synced/network folder can't do SQLite locking; the CLI says so if you
-  hit it. `/collab-list` then shows every project under that one root.
+- Set `COLLAB_ROOT` to the same local-disk path in every agent. It defaults to the
+  current repository's `.collab/`, which works when every participant uses that repo.
+  Set an explicit shared path only if participants work from different repository roots.
+  A synced/network folder can't do SQLite locking; the CLI says so if you hit it.
+  `/collab-list` then shows every project under that one root.
 - Stuck? Run `doctor` (CLI: `… doctor --project X`, or ask "run doctor on project X").
 
 ## Requirements
@@ -95,7 +96,7 @@ absolute path to `skills/agent-collab/bin/collab.py`:
 
 ```bash
 BIN="/absolute/path/to/agent-collab/skills/agent-collab/bin/collab.py"
-export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
+export COLLAB_ROOT="$(pwd)/.collab"   # optional; the default for this repo
 python3 "$BIN" watch --project A --agent codex-1   --exec codex exec -c service_tier=fast
 # Copilot uses the adapter's validated non-streaming JSONL transport:
 python3 "$BIN" watch --project A --agent copilot-1 \
@@ -106,10 +107,10 @@ See `skills/agent-collab/references/watchers.md` for flags, overrides, and failu
 
 ## Data location
 
-The bus stores everything under `COLLAB_ROOT` (use a local-disk path such as
-`$HOME/.collab`): a `collab.db` SQLite file and a content-hashed `blobs/`
-store for artifacts. Add `.collab/` to your `.gitignore`. Deleting a project removes its
-messages, inbox, and artifacts; shared content blobs are left on disk.
+The bus stores everything under `COLLAB_ROOT` (by default, the current repository's
+`.collab/`): a `collab.db` SQLite file and a content-hashed `blobs/` store for
+artifacts. Add `.collab/` to your `.gitignore`. Deleting a project removes its messages,
+inbox, and artifacts; shared content blobs are left on disk.
 
 ## Tests
 

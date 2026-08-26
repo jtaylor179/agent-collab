@@ -14,8 +14,8 @@ Steps:
    note it for step 4.
 2. Resolve `COLLAB_BIN` per the skill (Claude plugin path, then
    `~/.codex/skills/agent-collab/bin/collab.py`, then plugin cache). Set
-   `COLLAB_ROOT` to a local-disk path, default `$HOME/.collab` (the SAME path every
-   agent uses).
+   `COLLAB_ROOT` to a local-disk path, default `./.collab` in the current repository
+   (the SAME path every agent uses).
 3. `start` the project as `claude-1` (or `codex-1` if you are Codex), then `artifact put`
    the work product as v1, then broadcast a `review_request` (round 1) referencing
    `name@v1`.

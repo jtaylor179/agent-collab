@@ -17,7 +17,7 @@ Steps:
 
 1. Resolve `collab-watch.sh` next to `collab.py` (see skill for path resolution). Run:
    `collab-watch.sh <agent> <project> [repo-dir]`
-   (defaults: `COLLAB_ROOT=$HOME/.collab`, repo-dir = current dir).
+   (defaults: `COLLAB_ROOT=<repo-dir>/.collab`, repo-dir = current dir).
    - **Copilot:** `copilot-exec.sh` adapter, model `claude-opus-4.8`, reasoning
      effort `high`, read-only by default. Override with `COPILOT_MODEL`
      (`gpt-5.6-terra` is the recommended alternative) and

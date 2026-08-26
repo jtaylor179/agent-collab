@@ -9,6 +9,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN="$REPO/plugins/agent-collab"
 VER="$(python3 -c "import json;print(json.load(open('$PLUGIN/.claude-plugin/plugin.json'))['version'])")"
 
+# A plugin release must not rely on a human remembering to run tests. The version/content
+# guard below protects packaging drift; this protects behavior before any install changes.
+echo "== agent-collab test suite =="
+(cd "$REPO/collab" && python3 -m unittest test_collab -q)
+
 # Refuse to sync a drifted state: all manifests + the dist package must agree.
 echo "== version consistency check =="
 if ! python3 "$REPO/check_version.py"; then
@@ -93,6 +98,7 @@ echo "   Codex  session:  export COLLAB_AGENT=codex-1"
 echo "   Copilot session: export COLLAB_AGENT=copilot-1"
 echo "   Cursor session:  export COLLAB_AGENT=cursor-1"
 echo "   Antigravity:     export COLLAB_AGENT=antigravity-1"
-echo " Both must share:   export COLLAB_ROOT=\$HOME/.collab"
+echo " Same repo default:  COLLAB_ROOT=<repo>/.collab"
+echo " Different repos:    export COLLAB_ROOT=<one shared local-disk path>"
 echo " Two tools sharing one id is the #1 failure — nothing routes."
 echo "=============================================================="

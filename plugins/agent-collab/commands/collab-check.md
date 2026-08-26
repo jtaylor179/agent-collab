@@ -7,7 +7,8 @@ The user wants to check on a collaboration project. Use the `agent-collab` skill
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` to a local-disk path, default `$HOME/.collab` (the SAME path every agent uses). Determine the project name (from
+   `COLLAB_ROOT` to a local-disk path, default `./.collab` in the current repository
+   (the SAME path every agent uses). Determine the project name (from
    $ARGUMENTS or ask).
 2. Drain `claude-1`'s inbox: repeatedly `claim`; for each item, read the exact
    referenced artifact version, do the work (review, reconcile a response, etc.), and

@@ -10,13 +10,13 @@ below.
 ```bash
 pip install cursor-sdk
 export CURSOR_API_KEY=...   # from Cursor dashboard / SDK docs
-export COLLAB_ROOT="$HOME/.collab"
+export COLLAB_ROOT="$(pwd)/.collab"
 ```
 
 ## Resolve paths (works from Claude or Codex)
 
 ```bash
-export COLLAB_ROOT="${COLLAB_ROOT:-$HOME/.collab}"
+export COLLAB_ROOT="${COLLAB_ROOT:-$PWD/.collab}"
 for _p in \
   "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/agent-collab/bin/collab.py}" \
   "$HOME/.codex/skills/agent-collab/bin/collab.py" \
@@ -57,7 +57,7 @@ Defaults: `CURSOR_READONLY=1` (plan mode), `CURSOR_MODEL=composer-2.5`.
 In a **Cursor** chat (not Claude/Codex):
 
 > Review collab project `<project>`. Act as **cursor-1**. Use
-> `COLLAB_ROOT=$HOME/.collab`. Run `doctor`, `join`, drain inbox with `claim` →
+> repository-local `COLLAB_ROOT=./.collab`. Run `doctor`, `join`, drain inbox with `claim` →
 > `complete`. Read the skill `agent-collab` / `CURSOR.md`.
 
 ## Identity rule

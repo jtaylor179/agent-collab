@@ -17,7 +17,7 @@ commands and plain language.
 
 ```bash
 export COLLAB_AGENT=claude-1     # in CLAUDE ;  use codex-1 in the CODEX terminal
-export COLLAB_ROOT="$HOME/.collab"
+export COLLAB_ROOT="$(pwd)/.collab"
 ```
 
 **1. In Claude — start a review of a file:**
@@ -67,7 +67,7 @@ If you'd rather drive it explicitly (or from a plain terminal), here's the long 
 ## One-time setup (run in BOTH terminals)
 
 ```bash
-export COLLAB_ROOT="$HOME/.collab"   # local disk, identical in both
+export COLLAB_ROOT="$(pwd)/.collab"  # local disk, identical in both terminals
 export COLLAB_AGENT="claude-1"                  # in the CLAUDE terminal
 # export COLLAB_AGENT="codex-1"                 # in the CODEX terminal instead
 

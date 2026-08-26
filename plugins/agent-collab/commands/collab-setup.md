@@ -27,7 +27,7 @@ from the request, or a reused profile already set it):
 Review-mode steps:
 
 1. Resolve `COLLAB_BIN` and `COLLAB_ROOT` per the skill (same shared local-disk root,
-   default `$HOME/.collab`). You are the initiator (`claude-1`, or `codex-1` in Codex).
+   default `./.collab` in the current repository). You are the initiator (`claude-1`, or `codex-1` in Codex).
 2. **Round 1** (grouped questions — `AskUserQuestion` in Claude Code): work-product
    file path, reviewers (multi-select: codex-1 / copilot-1 / cursor-1 /
    antigravity-1), review focus, onboarding mode (background watchers you launch /

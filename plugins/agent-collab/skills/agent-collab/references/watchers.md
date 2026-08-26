@@ -1,6 +1,6 @@
 # Hands-off reviewers (the watcher)
 
-`collab watch` is how Codex, Copilot, Cursor, or Antigravity review automatically, without a human relaying
+`collab watch` is how Codex, Claude, Copilot, Cursor, or Antigravity review automatically, without a human relaying
 messages. A small loop *outside* the agent polls the bus, claims work, invokes the
 agent **single-shot** with the claimed message fed on **stdin** (an argv list — never
 interpolated into a shell, so no injection), captures the agent's stdout, and posts it
@@ -10,10 +10,14 @@ back as a response. A background heartbeat extends the lease while a long review
 
 ```bash
 BIN="${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py"
-export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
+export COLLAB_ROOT="$(pwd)/.collab"  # one shared root, same in every agent
 
 # Codex (reads instructions from stdin when no prompt arg is given):
 python3 "$BIN" watch --project X --agent codex-1 --exec codex exec -c service_tier=fast
+
+# Claude (the packaged launcher below is preferred; this direct form preflights auth):
+python3 "$BIN" watch --project X --agent claude-1 --exec claude --print \
+  --permission-mode dontAsk --no-chrome --no-session-persistence
 
 # Copilot: use the bundled adapter. It converts stdin to -p, captures Copilot's
 # non-streaming JSONL transport, and releases only one validated final assistant
@@ -38,6 +42,7 @@ The packaged launcher wraps these defaults:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" codex X /path/to/repo
+"${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" claude X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" copilot X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" cursor X /path/to/repo
 "${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab-watch.sh" antigravity X /path/to/repo
@@ -47,6 +52,14 @@ For Codex, the launcher defaults `COLLAB_CODEX_EXEC_ARGS` to
 `-c service_tier=fast`, matching codex-cli 0.125 behavior. Override it per run, for
 example `COLLAB_CODEX_EXEC_ARGS="" ... collab-watch.sh codex X` for plain
 `codex exec`.
+
+For Claude, both the launcher and the direct `--exec claude ...` form run `claude auth
+status` before the watcher starts, so an unavailable keychain/session fails before any
+review delivery is claimed. This matters
+when a sandboxed caller cannot see a host Claude subscription: launch the watcher from
+the host context that can access the login, rather than repeatedly stalling the review.
+Set `COLLAB_CLAUDE_AUTH_PREFLIGHT=0` only for a known nonstandard provider whose
+credentials cannot be reported by `claude auth status`.
 
 For Copilot, the launcher defaults to Claude Opus 4.8 (`claude-opus-4.8`) with
 reasoning effort `high`. Set `COPILOT_MODEL=gpt-5.6-terra` to start with GPT-5.6
@@ -121,8 +134,10 @@ collab-watch.sh copilot X /path/to/repo
 - **Hung agent** → killed at `--agent-timeout`; the claim expires and redelivers.
 - **Agent fails / empty output** → not acked; the claim expires and redelivers, up to
   `--max-deliveries`, after which the message is marked `stalled` (out of rotation) and
-  an audit `status` message is written to the log. Check `status --project X` →
-  `stalled` to see these.
+  an audit `status` message is written to the log. Diagnostics retain bounded stdout
+  and stderr because some CLIs report fatal auth errors on stdout. Check
+  `status --project X` → `stalled` to see these; after fixing the cause, requeue the
+  exact row with `retry --project X --message <id> --agent <id>`.
 - **Output validator rejects / fails / times out** → no response is posted; the same
   release/redelivery/stall path applies, with bounded diagnostics retained.
 - **Lost lease at reply time** → logged and skipped; the watcher keeps running.

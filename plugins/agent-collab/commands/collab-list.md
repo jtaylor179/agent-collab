@@ -7,7 +7,7 @@ The user wants to see their collab projects. Use the `agent-collab` skill.
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py`. Determine
-   `COLLAB_ROOT`: use `$COLLAB_ROOT` if set, otherwise the default `$HOME/.collab` family
+   `COLLAB_ROOT`: use `$COLLAB_ROOT` if set, otherwise the repository-local default `./.collab`
    — note that projects are stored PER root, so list the one the user has been using.
 2. Run `projects` (no project name needed):
    `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" projects`

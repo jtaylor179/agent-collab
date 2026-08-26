@@ -1071,6 +1071,44 @@ class Store:
                 self._restore_task_pool(project)
         return {"reclaimed": len(targets), "message_ids": targets, "forced": force}
 
+    def retry_stalled(self, project, message_id, agent):
+        """Explicitly return one stalled delivery to pending after its root cause is
+        fixed.
+
+        Stalled rows are intentionally never swept or reclaimed automatically: doing so
+        would recreate a poison-message loop. Recovery therefore requires the exact
+        message + recipient pair shown by `status`. A retry clears the abandoned lease
+        identity and resets the delivery budget; the next claim mints a fresh token, so
+        any zombie owner remains fenced out. For work-stealing tasks, reopen preempted
+        sibling rows so another worker may take the retry."""
+        self.get_project(project)
+        with self.write_tx():
+            row = self.conn.execute(
+                "SELECT i.message_id, i.recipient FROM inbox i "
+                "JOIN messages m USING(message_id) "
+                "WHERE m.project=? AND i.message_id=? AND i.recipient=? "
+                "AND i.status='stalled'",
+                (project, message_id, agent),
+            ).fetchone()
+            if not row:
+                raise CollabError(
+                    f"no stalled inbox row for message '{message_id}' "
+                    f"and recipient '{agent}' in project '{project}'")
+            self.conn.execute(
+                "UPDATE inbox SET status='pending', claimed_by=NULL, "
+                "claim_token=NULL, leased_until=NULL, deliveries=0, done_seq=NULL "
+                "WHERE message_id=? AND recipient=? AND status='stalled'",
+                (message_id, agent),
+            )
+            self._restore_task_pool(project)
+        return {
+            "retried": 1,
+            "project": project,
+            "message_id": message_id,
+            "recipient": agent,
+            "deliveries_reset": True,
+        }
+
     def release(self, project, agent, message_id, claim_token):
         """A worker/reviewer voluntarily hands its OWN claim back to the queue
         (token-fenced), for PROMPT recovery when its handler fails to start or errors —
@@ -1564,6 +1602,7 @@ class Store:
         fish all the steps'). This collapses the whole board into ONE recommended action
         for `agent`, so a loop can advance a multi-step plan hands-off:
 
+          retry    - a poison delivery was stalled; fix the cause and explicitly requeue
           reclaim  - a review claimed for you was abandoned (dead watcher); recover it
           drain    - you have inbox messages to claim + handle
           decide   - every reviewer has answered your latest review_request; converge
@@ -1590,6 +1629,14 @@ class Store:
             "pending_for_you": len(self.poll(project, agent)) if agent else 0,
             "orphaned_for_you": [f["message_id"] for f in self.in_flight(project, agent)
                                  if f["orphaned"]],
+            "stalled_for_you": [
+                r["message_id"] for r in self.conn.execute(
+                    "SELECT i.message_id FROM inbox i JOIN messages m USING(message_id) "
+                    "WHERE m.project=? AND i.recipient=? AND i.status='stalled' "
+                    "ORDER BY m.seq",
+                    (project, agent),
+                ).fetchall()
+            ] if agent else [],
             "latest_review_request": None, "responded": [], "awaiting": [],
             "current_round": self._current_round(project),
             "round_budget": p["max_rounds"],
@@ -1604,6 +1651,14 @@ class Store:
         if p["state"] == "converged":
             return result("done", "Project converged — advance to the next plan step "
                                   "(start/broadcast the next step's review).")
+        if out["stalled_for_you"]:
+            message_id = out["stalled_for_you"][0]
+            return result(
+                "retry",
+                f"{len(out['stalled_for_you'])} item(s) for you are stalled after "
+                "repeated handler failures. Fix the root cause, then run "
+                f"`retry --project {project} --message {message_id} "
+                f"--agent {agent}`.")
         if out["orphaned_for_you"]:
             ids = ", ".join(m[:8] for m in out["orphaned_for_you"])
             return result("reclaim", f"{len(out['orphaned_for_you'])} item(s) claimed "
@@ -1627,6 +1682,20 @@ class Store:
             if not tasks:
                 return result("broadcast", "No tasks posted yet — post the plan's "
                               "task(s) to put the workers to work.")
+            stalled_task = self.conn.execute(
+                "SELECT i.message_id, i.recipient FROM inbox i "
+                "JOIN messages m USING(message_id) "
+                "WHERE m.project=? AND m.type='task' AND i.status='stalled' "
+                "ORDER BY m.seq LIMIT 1",
+                (project,),
+            ).fetchone()
+            if stalled_task:
+                return result(
+                    "retry",
+                    "A task is stalled after repeated worker failures. Fix the cause, "
+                    f"then run `retry --project {project} "
+                    f"--message {stalled_task['message_id']} "
+                    f"--agent {stalled_task['recipient']}` to reopen it to the pool.")
             orphan_tasks = [f["message_id"] for f in self.in_flight(project)
                             if f["orphaned"] and f["type"] == "task"]
             if orphan_tasks:
@@ -1855,6 +1924,14 @@ class Store:
         # In-flight rows are claimed but not completed and thus NOT counted in
         # pending_for_you; an orphaned one is a review a dead watcher abandoned.
         out["in_flight_for_you"] = self.in_flight(project, agent) if agent else []
+        out["stalled_for_you"] = [
+            r["message_id"] for r in self.conn.execute(
+                "SELECT i.message_id FROM inbox i JOIN messages m USING(message_id) "
+                "WHERE m.project=? AND i.recipient=? AND i.status='stalled' "
+                "ORDER BY m.seq",
+                (project, agent),
+            ).fetchall()
+        ] if agent else []
         distinct = {r["agent_id"] for r in parts}
         has_rr = self.conn.execute(
             "SELECT 1 FROM messages WHERE project=? AND type='review_request' LIMIT 1",
@@ -1883,10 +1960,19 @@ class Store:
                      "NOT in your pending count. Recover them now with "
                      f"`reclaim --project {project} --agent {agent} --force` (or wait "
                      "for the lease to expire and a new claim to sweep them).")
+        if out["stalled_for_you"]:
+            message_id = out["stalled_for_you"][0]
+            h.append(
+                f"{len(out['stalled_for_you'])} item(s) for you are stalled after "
+                "repeated handler failures and will not redeliver automatically. "
+                "Fix the reported cause, then retry the first exact row with "
+                f"`retry --project {project} --message {message_id} "
+                f"--agent {agent}`.")
         if out["pending_for_you"]:
             h.append(f"You have {out['pending_for_you']} item(s) to handle: claim each, "
                      "read the referenced artifact, and respond/complete.")
-        elif mine and mine["role"] in FANOUT_ROLES and not orphaned:
+        elif (mine and mine["role"] in FANOUT_ROLES and not orphaned
+              and not out["stalled_for_you"]):
             h.append("Nothing pending for you right now.")
         approvals = self._approval_status(project)
         out["approvals"] = approvals
@@ -2169,8 +2255,8 @@ def _run_output_admission(validator_argv, assignment, agent_payload,
     return proc.returncode, _output_admission_diagnostic(proc.stdout, proc.stderr)
 
 
-def _output_admission_diagnostic(stdout, stderr):
-    """Format bounded validator diagnostics for watcher logs and stalled audits."""
+def _bounded_process_diagnostic(stdout, stderr):
+    """Format bounded subprocess diagnostics for watcher logs and stalled audits."""
     parts = []
     if stdout:
         if isinstance(stdout, bytes):
@@ -2181,6 +2267,51 @@ def _output_admission_diagnostic(stdout, stderr):
             stderr = stderr.decode("utf-8", "replace")
         parts.append(f"stderr: {stderr.strip()}")
     return "; ".join(parts)[:1000]
+
+
+def _output_admission_diagnostic(stdout, stderr):
+    """Format bounded validator diagnostics without allowing output replacement."""
+    return _bounded_process_diagnostic(stdout, stderr)
+
+
+def _claude_auth_preflight(agent, exec_argv):
+    """Fail before a direct Claude watcher can claim work without credentials.
+
+    The shell launcher has the same guard, but ``watch`` is public and is also
+    documented as a direct CLI entry point.  Keep this check here so that a
+    direct ``--agent claude-1 --exec claude ...`` invocation cannot burn its
+    delivery budget simply because its sandbox cannot see the host keychain.
+    Wrapper scripts are deliberately not guessed at: the caller can use the
+    packaged launcher, or set COLLAB_CLAUDE_AUTH_PREFLIGHT=0 for a known
+    provider whose status command cannot report its credentials.
+    """
+    if (agent != "claude-1" or not exec_argv
+            or os.environ.get("COLLAB_CLAUDE_AUTH_PREFLIGHT", "1") == "0"
+            or os.path.basename(str(exec_argv[0])).lower() != "claude"):
+        return None
+
+    import subprocess
+
+    executable = str(exec_argv[0])
+    try:
+        proc = subprocess.run(
+            [executable, "auth", "status"], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=10, check=False)
+    except FileNotFoundError:
+        return ("Claude Code executable is unavailable on PATH. Install Claude Code "
+                "or launch the watcher from the authenticated host context.")
+    except subprocess.TimeoutExpired:
+        return "Claude authentication preflight exceeded 10s. No collab message was claimed."
+    except OSError as e:
+        return f"Could not run Claude authentication preflight: {e}"
+
+    if proc.returncode == 0:
+        return None
+    detail = _bounded_process_diagnostic(proc.stdout, proc.stderr)
+    suffix = f" Diagnostic: {detail}" if detail else ""
+    return ("Claude authentication is unavailable in this execution context. "
+            "Run 'claude auth login' here, or launch the watcher from the host "
+            f"context that can access the Claude Code keychain. No collab message was claimed.{suffix}")
 
 
 def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
@@ -2197,6 +2328,9 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
     max_deliveries times is marked 'stalled' (taken out of rotation, surfaced to
     the human) instead of retrying forever; a lost lease at complete time is logged
     and skipped rather than crashing the daemon."""
+    claude_preflight_error = _claude_auth_preflight(agent, exec_argv)
+    if claude_preflight_error:
+        raise CollabError(claude_preflight_error)
     if output_admission_argv is not None:
         output_admission_argv = _normalize_output_admission_argv(
             output_admission_argv)
@@ -2236,7 +2370,10 @@ def watch(store, project, agent, exec_argv, poll_interval=2.0, once=False,
 
         failure_kind = None
         failure_rc = rc
-        failure_detail = err or ""
+        # Some CLIs (notably Claude Code auth failures) write fatal diagnostics to
+        # stdout even with a non-zero exit. Record both streams, bounded, instead of
+        # turning the actionable error into an empty multi-delivery stall.
+        failure_detail = _bounded_process_diagnostic(out, err)
         if rc != 0 or not response_body.strip():
             failure_kind = "agent failed"
         elif output_admission_argv is not None:
@@ -2590,7 +2727,7 @@ def build_parser():
     s = sub.add_parser(
         "next",
         help="one recommended action for a self-paced loop "
-             "(reclaim|drain|decide|wait|done|broadcast)")
+             "(retry|reclaim|drain|decide|wait|done|broadcast)")
     s.add_argument("--project", required=True)
     s.add_argument("--agent", default=os.environ.get("COLLAB_AGENT"),
                    help="agent id; defaults to $COLLAB_AGENT")
@@ -2607,6 +2744,15 @@ def build_parser():
     s.add_argument("--force", action="store_true",
                    help="reclaim even leases that have NOT expired yet (use when you "
                         "know the watcher is dead and won't wait out the lease)")
+
+    s = sub.add_parser(
+        "retry",
+        help="explicitly requeue one stalled delivery after its root cause is fixed")
+    s.add_argument("--project", required=True)
+    s.add_argument("--message", required=True,
+                   help="exact stalled message_id reported by status")
+    s.add_argument("--agent", required=True,
+                   help="exact stalled recipient reported by status")
 
     s = sub.add_parser(
         "watch",
@@ -2873,6 +3019,8 @@ def main(argv=None):
         elif cmd == "reclaim":
             _emit(store.reclaim(args.project, message_id=args.message,
                                 agent=args.agent, force=args.force))
+        elif cmd == "retry":
+            _emit(store.retry_stalled(args.project, args.message, args.agent))
         elif cmd == "watch":
             if not args.exec_argv:
                 raise CollabError("--exec requires an agent command, e.g. --exec codex exec")

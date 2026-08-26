@@ -7,7 +7,7 @@ The user wants to delete a collab project. Use the `agent-collab` skill.
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` (default `$HOME/.collab` family — the root where the project
+   `COLLAB_ROOT` (default `./.collab` in the current repository — the root where the project
    lives). Determine the project name from $ARGUMENTS; if not given, run `projects` and
    ask which one.
 2. **Confirm first.** Show the user the project's `status` (state, message count,

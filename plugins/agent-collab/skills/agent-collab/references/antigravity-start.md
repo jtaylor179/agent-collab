@@ -9,13 +9,13 @@ flow, then give the human **both** onboarding paths below.
 
 ```bash
 # agy must be on PATH (install via Antigravity CLI docs)
-export COLLAB_ROOT="$HOME/.collab"
+export COLLAB_ROOT="$(pwd)/.collab"
 ```
 
 ## Resolve paths (works from Claude or Codex)
 
 ```bash
-export COLLAB_ROOT="${COLLAB_ROOT:-$HOME/.collab}"
+export COLLAB_ROOT="${COLLAB_ROOT:-$PWD/.collab}"
 for _p in \
   "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/agent-collab/bin/collab.py}" \
   "$HOME/.codex/skills/agent-collab/bin/collab.py" \
@@ -59,7 +59,7 @@ Defaults: `ANTIGRAVITY_READONLY=1` (`--mode plan`), non-interactive via
 In an **Antigravity** chat (not Claude/Codex):
 
 > Review collab project `<project>`. Act as **antigravity-1**. Use
-> `COLLAB_ROOT=$HOME/.collab`. Run `doctor`, `join`, drain inbox with `claim` →
+> repository-local `COLLAB_ROOT=./.collab`. Run `doctor`, `join`, drain inbox with `claim` →
 > `complete`. Read the skill `agent-collab` / `ANTIGRAVITY.md`.
 
 ## Identity rule

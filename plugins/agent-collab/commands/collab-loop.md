@@ -10,7 +10,7 @@ action and executes it, so the plan moves without a human interpreting `status`.
 Setup:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` (local-disk, default `$HOME/.collab` — the SAME path every agent uses).
+   `COLLAB_ROOT` (local-disk, default `./.collab` in the current repository — the SAME path every agent uses).
    Determine the project (from $ARGUMENTS or ask) and your identity (`$COLLAB_AGENT`,
    else `claude-1`).
 2. Confirm to the user that you'll self-pace this plan and roughly how (drive each step's
@@ -19,6 +19,8 @@ Setup:
 
 Each tick — run `next --project <X> --agent <me>` and branch on `action`:
 
+- **`retry`** — a delivery exhausted its retry budget and is stalled. Fix the reported
+  handler/auth problem, then run `retry --project <X> --message <id> --agent <me>`.
 - **`reclaim`** — a review claimed for you was abandoned (a watcher died mid-run). Run
   `reclaim --project <X> --agent <me> --force`, then continue. (A dead reviewer watcher
   is the usual cause of a stall; relaunch it if it's supposed to be hands-off — see

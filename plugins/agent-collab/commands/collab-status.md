@@ -7,7 +7,8 @@ The user wants a status snapshot of a collaboration project. Use the `agent-coll
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` to a local-disk path, default `$HOME/.collab` (the SAME path every agent uses). Determine the project name (from
+   `COLLAB_ROOT` to a local-disk path, default `./.collab` in the current repository
+   (the SAME path every agent uses). Determine the project name (from
    $ARGUMENTS or ask).
 2. Run `status --project <X>`.
 3. Report in plain language: project state (gathering / reviewing / converged / etc.),

@@ -10,7 +10,7 @@ reviewers accept them, and converge when all are accepted.
 Setup:
 
 1. `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py`, `COLLAB_ROOT`
-   (local-disk, default `$HOME/.collab`). Project from $ARGUMENTS or ask. Your identity
+   (local-disk, default `./.collab` in the current repository). Project from $ARGUMENTS or ask. Your identity
    `$COLLAB_AGENT` (else `claude-1`).
 2. Start the plan as the orchestrator (`start --project X --role orchestrator
    [--accept-policy any|all|final:<id>]`) if it's new. Register participants with DISTINCT
@@ -35,6 +35,8 @@ Each tick — run `next --project X --agent <me>` and branch on `action`:
 - **`wait`** — workers/reviewers still finishing (`out.tasks.by_state` shows the split:
   todo/claimed/submitted). Sleep briefly, re-tick. If a task sits `submitted` with no
   trusted reviewer online, (re)launch an approver's watcher.
+- **`retry`** — a task stalled after bounded worker failures. Fix the cause, then use
+  the exact message and recipient from `next`/`status`: `retry --project X --message <id> --agent <worker>`.
 - **`reclaim`** — a task was abandoned by a dead worker; `reclaim --project X --force`
   reopens it to the pool, then continue.
 - **`decide`** — every task is `accepted` by a trusted reviewer; `decide` to converge the

@@ -12,7 +12,7 @@ do not create an empty project.
 Steps:
 
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
-   `COLLAB_ROOT` to a local-disk path (default `$HOME/.collab`).
+   `COLLAB_ROOT` to a local-disk path (default `./.collab` in the current repository).
 2. `start` the project (derive a project name from $ARGUMENTS or ask).
 3. `artifact put` the given file as the work product (v1).
 4. Broadcast a `review_request` (round 1) referencing `<name>@v1`, with a body stating

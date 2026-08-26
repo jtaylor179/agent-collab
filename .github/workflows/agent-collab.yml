@@ -1,0 +1,22 @@
+name: agent-collab
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    # The read-only Copilot adapter intentionally relies on macOS sandbox-exec.
+    # Running this suite on Linux would fail closed instead of exercising that contract.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run agent-collab tests
+        working-directory: collab
+        run: python3 -m unittest test_collab -q
+      - name: Verify release manifests and packaged plugin content
+        run: python3 check_version.py
