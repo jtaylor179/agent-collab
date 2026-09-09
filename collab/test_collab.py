@@ -3037,6 +3037,21 @@ class TestCursorExecAdapter(unittest.TestCase):
         args = self._run({"CURSOR_MODEL": "gpt-5"})
         self.assertEqual(args[args.index("--model") + 1], "gpt-5")
 
+    def test_friendly_model_names_map_to_cli_ids(self):
+        cases = {
+            "grok 4.6": "cursor-grok-4.6-high",
+            "Grok 4.6": "cursor-grok-4.6-high",
+            "grok-4.6": "cursor-grok-4.6-high",
+            "grok 4.6 fast": "cursor-grok-4.6-high-fast",
+            "composer 2.5": "composer-2.5",
+            "composer 2.5 fast": "composer-2.5-fast",
+            "cursor-grok-4.6-high": "cursor-grok-4.6-high",
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                args = self._run({"CURSOR_MODEL": name})
+                self.assertEqual(args[args.index("--model") + 1], expected)
+
     def test_edit_mode_adds_force_and_drops_plan(self):
         args = self._run({"CURSOR_READONLY": "0"})
         self.assertIn("--force", args)

@@ -17,8 +17,49 @@
 # Requires: Cursor CLI on PATH (`agent` or `cursor-agent`), or CURSOR_BIN.
 # Auth: `agent login` or CURSOR_API_KEY. Read-only by default
 # (CURSOR_READONLY=1 → --mode plan). Override model with CURSOR_MODEL
-# (default: composer-2.5). Extra args are forwarded ahead of the prompt.
+# (default: composer-2.5). Friendly names like "grok 4.6" and
+# "composer 2.5" are mapped to CLI ids. Extra args are forwarded
+# ahead of the prompt.
 set -euo pipefail
+
+normalize_cursor_model() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' _-' '-'
+}
+
+# Map product/friendly names to `agent --list-models` ids. Unknown values
+# (including already-canonical ids) pass through unchanged.
+resolve_cursor_model() {
+  local key
+  key="$(normalize_cursor_model "${1:-}")"
+  case "$key" in
+    ""|composer|composer-2|composer2.5|composer-2.5)
+      printf '%s\n' "composer-2.5" ;;
+    composer-fast|composer-2-fast|composer-2.5-fast)
+      printf '%s\n' "composer-2.5-fast" ;;
+    grok|grok-4.6|grok4.6|cursor-grok-4.6|cursor-grok-4.6-high)
+      printf '%s\n' "cursor-grok-4.6-high" ;;
+    grok-fast|grok-4.6-fast|cursor-grok-4.6-fast|cursor-grok-4.6-high-fast)
+      printf '%s\n' "cursor-grok-4.6-high-fast" ;;
+    grok-4.6-low|cursor-grok-4.6-low)
+      printf '%s\n' "cursor-grok-4.6-low" ;;
+    grok-4.6-low-fast|cursor-grok-4.6-low-fast)
+      printf '%s\n' "cursor-grok-4.6-low-fast" ;;
+    grok-4.6-medium|cursor-grok-4.6-medium)
+      printf '%s\n' "cursor-grok-4.6-medium" ;;
+    grok-4.6-medium-fast|cursor-grok-4.6-medium-fast)
+      printf '%s\n' "cursor-grok-4.6-medium-fast" ;;
+    grok-4.6-xhigh|grok-4.6-extra-high|cursor-grok-4.6-xhigh)
+      printf '%s\n' "cursor-grok-4.6-xhigh" ;;
+    grok-4.6-xhigh-fast|cursor-grok-4.6-xhigh-fast)
+      printf '%s\n' "cursor-grok-4.6-xhigh-fast" ;;
+    grok-4.5|cursor-grok-4.5|cursor-grok-4.5-high)
+      printf '%s\n' "cursor-grok-4.5-high" ;;
+    grok-4.5-fast|cursor-grok-4.5-fast|cursor-grok-4.5-high-fast)
+      printf '%s\n' "cursor-grok-4.5-high-fast" ;;
+    *)
+      printf '%s\n' "$1" ;;
+  esac
+}
 
 resolve_cursor_agent() {
   if [ -n "${CURSOR_BIN:-}" ]; then
@@ -87,7 +128,7 @@ if ! CURSOR_AGENT="$(resolve_cursor_agent)"; then
   exit 1
 fi
 
-MODEL="${CURSOR_MODEL:-composer-2.5}"
+MODEL="$(resolve_cursor_model "${CURSOR_MODEL:-composer-2.5}")"
 CWD="${COLLAB_CWD:-$PWD}"
 
 readonly_args=()

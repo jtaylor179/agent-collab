@@ -28,7 +28,8 @@ Steps:
    - **Cursor:** `cursor-exec.sh` → Cursor CLI `agent -p` (prompt-as-arg). Requires
      `agent` or `cursor-agent` on PATH (or `CURSOR_BIN`) and `agent login` or
      `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1` → `--mode plan`).
-     Override model with `CURSOR_MODEL` (default `composer-2.5`).
+     Override model with `CURSOR_MODEL` (default `composer-2.5`; friendly names
+     like `grok 4.6` map to `cursor-grok-4.6-high`).
    - **Antigravity:** `antigravity-exec.sh` → `agy --print` (prompt-as-arg). Requires
      `agy` on PATH. Read-only by default (`ANTIGRAVITY_READONLY=1` → `--mode plan`).
 2. **Set `COLLAB_WATCH_DETACH=1`** so the watcher is SPAWNED in its own session

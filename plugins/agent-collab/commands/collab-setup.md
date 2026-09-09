@@ -36,7 +36,8 @@ Review-mode steps:
 3. **Round 2** (one grouped round): per selected agent — role (reviewer default;
    approver = sign-off required before `decide` converges; observer = log-only),
    model (defaults: Codex CLI default, Copilot `claude-opus-4.8` with
-   `gpt-5.6-terra` as the recommended alternative, Cursor `composer-2.5`, agy auto),
+   `gpt-5.6-terra` as the recommended alternative, Cursor Composer 2.5 /
+   Grok 4.6, agy auto),
    reasoning effort (Copilot defaults to `high`; allow
    `none|minimal|low|medium|high|xhigh|max`), and access (read-only default). Register approvers/observers with
    `join --role <role>` before launching their watcher. Use the skill's

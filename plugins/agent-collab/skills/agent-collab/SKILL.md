@@ -317,8 +317,11 @@ per agent. Defaults first.
   and say so.
 - **Model:** offer the default plus 1–2 known alternatives; free-text for anything
   else. For Copilot, offer Claude Opus 4.8 (`claude-opus-4.8`, default) and GPT-5.6
-  Terra (`gpt-5.6-terra`) explicitly. Plumb the choice through the env knob when
-  launching that agent's watcher.
+  Terra (`gpt-5.6-terra`) explicitly. For Cursor, offer Composer 2.5 (`composer-2.5`,
+  default) and Grok 4.6 (`cursor-grok-4.6-high`); accept friendly names ("grok 4.6",
+  "composer 2.5", "grok 4.6 fast") — `cursor-exec.sh` maps them to CLI ids. Plumb
+  the choice through the env knob when launching that agent's watcher. `agent
+  --list-models` lists every id the account can use.
 - **Reasoning effort:** for Copilot, default to `high`; allow
   `none|minimal|low|medium|high|xhigh|max`. Plumb the choice through
   `COPILOT_REASONING_EFFORT`.
@@ -332,8 +335,26 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
 | `claude-1` | `COLLAB_CLAUDE_EXEC_ARGS` — append `--model <model>` | Claude Code CLI default | Claude launcher uses its non-interactive permission mode |
 | `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` |
-| `cursor-1` | `CURSOR_MODEL` | `composer-2.5` | `CURSOR_READONLY` |
+| `cursor-1` | `CURSOR_MODEL` | `composer-2.5` (alt: Grok 4.6 → `cursor-grok-4.6-high`) | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
+
+**Cursor model names.** Users often say "grok 4.6" or "composer 2.5". That is valid.
+Set `CURSOR_MODEL` to the friendly name or the CLI id — `cursor-exec.sh` maps
+these before calling `agent --model`. Do not reject a friendly name, and do not
+ask the user for the hyphenated id if they already named the product.
+
+| User says | `CURSOR_MODEL` / CLI id |
+|---|---|
+| composer 2.5 (default) | `composer-2.5` |
+| composer 2.5 fast | `composer-2.5-fast` |
+| grok 4.6 / grok-4.6 | `cursor-grok-4.6-high` |
+| grok 4.6 fast | `cursor-grok-4.6-high-fast` |
+| grok 4.6 low / medium / extra high | `cursor-grok-4.6-low` / `-medium` / `-xhigh` (add `-fast` if they asked for fast) |
+| grok 4.5 | `cursor-grok-4.5-high` |
+| an already-canonical id (`cursor-grok-4.6-high`, `gpt-5.3-codex`, …) | pass through |
+
+If they name some other Cursor model, pass it through as `CURSOR_MODEL` (or look it
+up with `agent --list-models`).
 
 **Then execute** the normal initiator flow — one `review` command (create + snapshot
 + broadcast), `join --role observer` for any observers, and onboard reviewers per the

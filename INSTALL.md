@@ -112,9 +112,9 @@ python3 "$BIN" watch --project A --agent cursor-1 \
   --exec "${BIN%/collab.py}/cursor-exec.sh"
 ```
 
-Override the model with `CURSOR_MODEL` (default `composer-2.5`).
-`agent --list-models` lists ids your account can use. Read-only reviews are the
-default (`CURSOR_READONLY=1` → `--mode plan`).
+Override the model with `CURSOR_MODEL` (default `composer-2.5`; `grok 4.6` maps
+to `cursor-grok-4.6-high`). `agent --list-models` lists ids your account can use.
+Read-only reviews are the default (`CURSOR_READONLY=1` → `--mode plan`).
 
 ## Shared data
 

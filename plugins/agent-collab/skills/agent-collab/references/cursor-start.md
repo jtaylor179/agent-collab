@@ -56,8 +56,10 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project <project> \
 ```
 
 Defaults: `CURSOR_READONLY=1` (`--mode plan`), `CURSOR_MODEL=composer-2.5`.
-Override the model with `CURSOR_MODEL` (`agent --list-models` shows ids for the
-logged-in account). Set `CURSOR_READONLY=0` for edit-capable runs (`--force`).
+Override the model with `CURSOR_MODEL`. Friendly names work (`grok 4.6`,
+`composer 2.5`, `grok 4.6 fast`); they map to CLI ids (`cursor-grok-4.6-high`,
+`composer-2.5`, `cursor-grok-4.6-high-fast`). `agent --list-models` shows every
+id for the logged-in account. Set `CURSOR_READONLY=0` for edit-capable runs (`--force`).
 
 ## Path B — interactive Cursor session
 
