@@ -25,8 +25,10 @@ Steps:
      for isolated exact-output jobs, set `COPILOT_CUSTOM_INSTRUCTIONS=0`.
    - **Codex:** `codex exec -c service_tier=fast` (stdin). Override with
      `COLLAB_CODEX_EXEC_ARGS`.
-   - **Cursor:** `cursor-exec.sh` → `cursor_sdk` (stdin). Requires `pip install
-     cursor-sdk` and `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1`).
+   - **Cursor:** `cursor-exec.sh` → Cursor CLI `agent -p` (prompt-as-arg). Requires
+     `agent` or `cursor-agent` on PATH (or `CURSOR_BIN`) and `agent login` or
+     `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1` → `--mode plan`).
+     Override model with `CURSOR_MODEL` (default `composer-2.5`).
    - **Antigravity:** `antigravity-exec.sh` → `agy --print` (prompt-as-arg). Requires
      `agy` on PATH. Read-only by default (`ANTIGRAVITY_READONLY=1` → `--mode plan`).
 2. **Set `COLLAB_WATCH_DETACH=1`** so the watcher is SPAWNED in its own session

@@ -73,7 +73,7 @@ export COLLAB_AGENT="claude-1"                  # in the CLAUDE terminal
 
 # point COLLAB_BIN at the bundled CLI (needed for the terminal commands below).
 # inside Claude/Codex the skill finds it automatically; in a plain terminal, set it:
-export COLLAB_BIN="$(find "$HOME/.claude/plugins" "$HOME/.codex/skills" -name collab.py -path '*agent-collab*' 2>/dev/null | head -1)"
+export COLLAB_BIN="$(find "$HOME/.claude/plugins" "$HOME/.codex/skills" "$HOME/.cursor/skills" -name collab.py -path '*agent-collab*' 2>/dev/null | head -1)"
 echo "$COLLAB_BIN"   # sanity-check it printed a path
 ```
 

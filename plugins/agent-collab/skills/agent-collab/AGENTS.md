@@ -20,12 +20,12 @@ Then give them **one** of:
 When the human says **"start agent-collab with cursor …"** or **"collab on X with
 cursor"**, follow `skills/agent-collab/references/cursor-start.md` after the normal
 `start` → `artifact put` → `post review_request` flow. Prerequisites for the human:
-`pip install cursor-sdk`, `export CURSOR_API_KEY=...`, and the repository-local default
-`COLLAB_ROOT=./.collab`.
+Cursor CLI (`agent` or `cursor-agent` on PATH, or `CURSOR_BIN`), `agent login` or
+`CURSOR_API_KEY`, and the repository-local default `COLLAB_ROOT=./.collab`.
 
 Then give them **one** of:
 - `collab-watch.sh cursor <project> <repo-dir>` (background terminal), or
-- In Cursor chat: *"review collab project &lt;X&gt; as cursor-1"* (see `CURSOR.md`).
+- In Cursor chat or `agent`: *"review collab project &lt;X&gt; as cursor-1"* (see `CURSOR.md`).
 
 ## Your identity (reviewer mode)
 

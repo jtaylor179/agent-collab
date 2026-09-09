@@ -15,7 +15,9 @@ export COLLAB_ROOT="${COLLAB_ROOT:-$PWD/.collab}"
 export COLLAB_AGENT=cursor-1
 # Resolve collab.py (first match wins; cache lookups pick the NEWEST installed version):
 for _p in \
+  "$HOME/.cursor/skills/agent-collab/bin/collab.py" \
   "$HOME/.codex/skills/agent-collab/bin/collab.py" \
+  "$(ls -d "$HOME/.cursor/plugins/cache/"*"/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)" \
   "$(ls -d "$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)" \
   "$(ls -d "$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)"
 do
@@ -53,7 +55,9 @@ The human may run a watcher instead:
 collab-watch.sh cursor <project> /path/to/repo
 ```
 
-That invokes `cursor-exec.sh` → `cursor_sdk.Agent.prompt` with the bus payload on stdin.
-If you are an **approver** running hands-off, sign off by making the FIRST line of
-your output exactly `APPROVED` (then your reasoning) — the watcher posts it as an
-`approval`. Any other output posts as a normal response and the gate stays closed.
+That invokes `cursor-exec.sh` → Cursor CLI `agent -p` (or `cursor-agent`) with the bus
+payload as the print-mode prompt. Requires `agent` on PATH (or `CURSOR_BIN`) and
+`agent login` or `CURSOR_API_KEY`. If you are an **approver** running hands-off, sign
+off by making the FIRST line of your output exactly `APPROVED` (then your reasoning) —
+the watcher posts it as an `approval`. Any other output posts as a normal response and
+the gate stays closed.

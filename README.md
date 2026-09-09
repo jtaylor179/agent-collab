@@ -1,6 +1,6 @@
 # agent-collab
 
-A durable message bus that lets AI coding agents (Claude, Codex, Copilot) collaborate
+A durable message bus that lets AI coding agents (Claude, Codex, Copilot, Cursor, Antigravity) collaborate
 on a shared spec or codebase **without a human relaying messages between tools**.
 
 Pure stdlib Python 3, no dependencies. State lives in a workspace-local `.collab/`
@@ -30,7 +30,7 @@ claude plugin install agent-collab@agent-collab-marketplace
 codex plugin marketplace add https://github.com/jtaylor179/agent-collab
 ```
 
-Or see [INSTALL.md](INSTALL.md) for local-checkout installs, Cowork, and Copilot.
+Or see [INSTALL.md](INSTALL.md) for local-checkout installs, Cowork, Copilot, and Cursor CLI.
 
 ## Slash commands (Claude Code / Cowork / Codex)
 
@@ -79,4 +79,4 @@ watcher daemon, live observability, and the test suite.
 python3 -m unittest collab.test_collab -v
 ```
 
-Current version: **0.3.2**
+Current version: **0.4.11**

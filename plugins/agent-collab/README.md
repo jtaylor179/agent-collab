@@ -1,6 +1,6 @@
 # agent-collab
 
-Collaborate with other AI agents — Codex, Copilot, and Claude — on a shared spec or
+Collaborate with other AI agents — Codex, Copilot, Claude, Cursor, and Antigravity — on a shared spec or
 codebase through a durable message bus, instead of copy/pasting feedback between tools.
 
 You start a collaboration project with one agent, other agents **join** and review, and
@@ -57,14 +57,15 @@ Each agent needs a **distinct** id and they must share **one local-disk** bus:
 ## Requirements
 
 - Python 3 (standard library only — no pip installs).
-- To use Codex/Copilot as hands-off reviewers, their CLIs (`codex`, `copilot`)
-  installed and on PATH. Claude can participate directly via the skill.
+- To use Codex/Copilot/Cursor as hands-off reviewers, their CLIs (`codex`, `copilot`,
+  `agent`) installed and on PATH. Claude can participate directly via the skill.
 
 ## Upgrading
 
 Installs do not auto-update. After pulling a new version, run **`./sync.sh`** from the
-repo (it updates the Claude plugin, installs the native global Codex plugin, and
-refreshes the legacy Codex skill fallback), then **restart** Claude Code / Codex.
+repo (it updates the Claude plugin, installs the native global Codex plugin, copies the
+skill to `~/.cursor/skills/agent-collab` for Cursor CLI, and refreshes the legacy Codex
+skill fallback), then **restart** Claude Code / Codex / Cursor.
 Verify with `claude plugin list`, `codex plugin list`, and `… doctor`.
 
 ## How it works

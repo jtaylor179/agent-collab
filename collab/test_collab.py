@@ -2830,6 +2830,19 @@ if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
 fi
 exit 0
 """)
+        self._write_executable(
+            "agent",
+            """#!/bin/sh
+if [ "${1:-}" = "status" ]; then
+  if [ "${FAKE_CURSOR_AUTH:-ok}" = "fail" ]; then
+    printf '%s\n' '{"status":"unauthenticated","isAuthenticated":false}'
+    exit 0
+  fi
+  printf '%s\n' '{"status":"authenticated","isAuthenticated":true}'
+  exit 0
+fi
+exit 0
+""")
 
     def _write_executable(self, name, body):
         path = os.path.join(self.fake_bin, name)
@@ -2842,7 +2855,9 @@ exit 0
         for key in (
                 "COLLAB_ROOT", "COLLAB_WATCH_ARGS", "COLLAB_WATCH_DETACH",
                 "COLLAB_WATCH_LOG", "COLLAB_CLAUDE_EXEC_ARGS",
-                "COLLAB_CODEX_EXEC_ARGS", "COLLAB_CLAUDE_AUTH_PREFLIGHT"):
+                "COLLAB_CODEX_EXEC_ARGS", "COLLAB_CLAUDE_AUTH_PREFLIGHT",
+                "COLLAB_CURSOR_AUTH_PREFLIGHT", "CURSOR_BIN", "CURSOR_API_KEY",
+                "CURSOR_MODEL", "CURSOR_READONLY", "CURSOR_AGENT_MODE"):
             env.pop(key, None)
         env.update({
             "PATH": self.fake_bin + os.pathsep + env.get("PATH", ""),
@@ -2932,10 +2947,118 @@ exit 0
         self.assertIn("Claude Code is unavailable on PATH", out.stderr)
         self.assertIn("Install Claude Code", out.stderr)
 
+    def test_cursor_auth_failure_stops_before_the_bus_can_be_claimed(self):
+        out = self._run("cursor", FAKE_CURSOR_AUTH="fail")
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(self.capture))
+        self.assertIn(
+            "Cursor authentication is unavailable in this execution context",
+            out.stderr)
+        self.assertIn('"isAuthenticated":false', out.stderr)
+        self.assertIn("No collab message was claimed", out.stderr)
+
+    def test_cursor_auth_preflight_can_be_explicitly_bypassed(self):
+        out = self._run(
+            "cursor", FAKE_CURSOR_AUTH="fail",
+            COLLAB_CURSOR_AUTH_PREFLIGHT="0")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(os.path.exists(self.capture))
+
+    def test_cursor_api_key_skips_login_status_check(self):
+        out = self._run(
+            "cursor", FAKE_CURSOR_AUTH="fail", CURSOR_API_KEY="cursor_test")
+
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(os.path.exists(self.capture))
+
+    def test_missing_cursor_binary_stops_before_the_bus_can_be_claimed(self):
+        os.unlink(os.path.join(self.fake_bin, "agent"))
+        out = self._run(
+            "cursor",
+            PATH=self.fake_bin + os.pathsep + "/usr/bin:/bin",
+            HOME=self.tmp)
+
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(self.capture))
+        self.assertIn("Cursor CLI is unavailable on PATH", out.stderr)
+        self.assertIn("No collab message was claimed", out.stderr)
+
     def test_missing_repo_fails_before_watcher_start(self):
         out = self._run("codex", repo=os.path.join(self.tmp, "missing"))
         self.assertNotEqual(out.returncode, 0)
         self.assertFalse(os.path.exists(self.capture))
+
+
+class TestCursorExecAdapter(unittest.TestCase):
+    """Cursor CLI adapter: print-mode argv, model/readonly knobs, empty stdin."""
+
+    def _invoke(self, env_overrides=None, extra_args=None, stdin="review payload"):
+        adapter = os.path.join(PLUGIN_BIN, "cursor-exec.sh")
+        with tempfile.TemporaryDirectory(prefix="cursor_adapter_test_") as tmp:
+            fake = os.path.join(tmp, "agent")
+            with open(fake, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json, sys\n"
+                    "print(json.dumps(sys.argv[1:]))\n")
+            os.chmod(fake, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = tmp + os.pathsep + env.get("PATH", "")
+            env["HOME"] = tmp
+            env["COLLAB_CWD"] = tmp
+            for key in (
+                    "CURSOR_BIN", "CURSOR_MODEL", "CURSOR_READONLY",
+                    "CURSOR_AGENT_MODE", "CURSOR_API_KEY"):
+                env.pop(key, None)
+            env.update(env_overrides or {})
+            return subprocess.run(
+                [adapter, *(extra_args or [])],
+                input=stdin,
+                capture_output=True, text=True, env=env, timeout=10)
+
+    def _run(self, env_overrides=None, extra_args=None, stdin="review payload"):
+        out = self._invoke(env_overrides, extra_args, stdin)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_defaults_to_plan_mode_composer_and_text_print(self):
+        args = self._run()
+        self.assertEqual(args[0], "--print")
+        self.assertEqual(args[args.index("--output-format") + 1], "text")
+        self.assertIn("--trust", args)
+        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        self.assertEqual(args[args.index("--model") + 1], "composer-2.5")
+        self.assertNotIn("--force", args)
+        self.assertEqual(args[-1], "review payload")
+
+    def test_model_is_overridable(self):
+        args = self._run({"CURSOR_MODEL": "gpt-5"})
+        self.assertEqual(args[args.index("--model") + 1], "gpt-5")
+
+    def test_edit_mode_adds_force_and_drops_plan(self):
+        args = self._run({"CURSOR_READONLY": "0"})
+        self.assertIn("--force", args)
+        self.assertNotIn("--mode", args)
+
+    def test_agent_mode_override_can_select_ask(self):
+        args = self._run({"CURSOR_AGENT_MODE": "ask"})
+        self.assertEqual(args[args.index("--mode") + 1], "ask")
+        self.assertNotIn("--force", args)
+
+    def test_empty_stdin_fails_closed(self):
+        out = self._invoke(stdin="")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("empty stdin", out.stderr)
+
+    def test_missing_binary_fails_before_prompt(self):
+        out = self._invoke({
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent-cursor-home",
+        })
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("Cursor CLI not found", out.stderr)
 
 
 class TestCopilotExecAdapter(unittest.TestCase):

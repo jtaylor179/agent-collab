@@ -4,13 +4,13 @@
     "name": "Jeff Taylor"
   },
   "metadata": {
-    "description": "Local marketplace for the agent-collab plugin."
+    "description": "Marketplace for the agent-collab plugin."
   },
   "plugins": [
     {
       "name": "agent-collab",
       "source": "./plugins/agent-collab",
-      "description": "Collaborate with other AI agents (Codex, Copilot, Cursor) on a shared spec or codebase through a durable message bus.",
+      "description": "Collaborate with other AI agents (Codex, Copilot, Claude, Antigravity) on a shared spec or codebase through a durable message bus.",
       "version": "0.4.11"
     }
   ]

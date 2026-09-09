@@ -25,7 +25,7 @@ python3 "$BIN" watch --project X --agent claude-1 --exec claude --print \
 python3 "$BIN" watch --project X --agent copilot-1 \
   --exec "${BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
 
-# Cursor (Cursor Agent SDK via cursor-exec.sh; reads stdin JSON like Codex):
+# Cursor (Cursor CLI via cursor-exec.sh; prompt-as-arg like Copilot/agy):
 python3 "$BIN" watch --project X --agent cursor-1 --exec /path/to/cursor-exec.sh
 
 # Antigravity (agy --print via antigravity-exec.sh; prompt-as-arg like Copilot):
@@ -70,9 +70,13 @@ remain enabled for code work. The adapter owns `--output-format json --stream of
 fails closed on malformed or ambiguous JSONL, and never trims or repairs the
 assistant content.
 
-For Cursor, install `cursor-sdk` (`pip install cursor-sdk`) and set `CURSOR_API_KEY`.
-Read-only by default (`CURSOR_READONLY=1` → `plan` mode). Override model with
-`CURSOR_MODEL` (default `composer-2.5`).
+For Cursor, install Cursor CLI (`curl https://cursor.com/install -fsS | bash`) so
+`agent` or `cursor-agent` is on PATH, then `agent login` (or set `CURSOR_API_KEY`).
+Pin a non-PATH binary with `CURSOR_BIN`. Read-only by default (`CURSOR_READONLY=1`
+→ `--mode plan`). Override model with `CURSOR_MODEL` (default `composer-2.5`;
+`agent --list-models` lists ids for the account). The launcher runs
+`cursor-exec.sh --preflight` before claiming work; set
+`COLLAB_CURSOR_AUTH_PREFLIGHT=0` only for a known nonstandard auth path.
 
 For Antigravity, ensure `agy` is on PATH. Read-only by default
 (`ANTIGRAVITY_READONLY=1` → `--mode plan`). Override model with `ANTIGRAVITY_MODEL` or

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Guard against agent-collab version drift.
 
-Checks that the version is identical across every place it's declared — the Claude
-plugin manifest, the Codex plugin manifest, the marketplace entry, and (if built) the
+Checks that the version is identical across every place it's declared — the Claude,
+Codex, and Cursor plugin manifests, the marketplace entries, and (if built) the
 packaged dist/agent-collab.plugin. Exits non-zero with a clear report on any mismatch.
 
 Run by sync.sh (before pushing to installs) and by the test suite. The real run that
@@ -33,8 +33,12 @@ def collect():
             "plugins/agent-collab/.claude-plugin/plugin.json"),
         "plugins/agent-collab/.codex-plugin/plugin.json": _plugin_version(
             "plugins/agent-collab/.codex-plugin/plugin.json"),
+        "plugins/agent-collab/.cursor-plugin/plugin.json": _plugin_version(
+            "plugins/agent-collab/.cursor-plugin/plugin.json"),
         ".claude-plugin/marketplace.json": _marketplace_version(
             ".claude-plugin/marketplace.json"),
+        ".cursor-plugin/marketplace.json": _marketplace_version(
+            ".cursor-plugin/marketplace.json"),
     }
     dist = os.path.join(ROOT, "dist", "agent-collab.plugin")
     if os.path.exists(dist):
@@ -102,7 +106,7 @@ def main():
     if not consistent:
         print(
             f"\nVERSION DRIFT detected: {sorted(set(versions.values()))}.\n"
-            "Set the same version in all three manifests and rebuild the package:\n"
+            "Set the same version in all plugin and marketplace manifests and rebuild the package:\n"
             + REBUILD_HINT,
             file=sys.stderr)
         return 1

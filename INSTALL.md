@@ -1,16 +1,16 @@
 # Installing agent-collab
 
 The plugin source lives in `plugins/agent-collab/`. A prebuilt archive is in
-`dist/agent-collab.plugin`. There are three install paths depending on which agent you
-want to use it with.
+`dist/agent-collab.plugin`. Install paths depend on which agent you want to use it with.
 
 > **Upgrading? Installs do not auto-update.** If you installed an earlier version, the
-> running Claude/Codex keep using the old copy until you re-sync. The fastest way is to
+> running Claude/Codex/Cursor keep using the old copy until you re-sync. The fastest way is to
 > run **`./sync.sh`** from this directory — it refreshes the Claude marketplace,
 > installs `agent-collab@agent-collab-marketplace` as a native global Codex plugin,
-> and refreshes the legacy `~/.codex/skills/agent-collab` fallback for older Codex
-> builds. Then restart Claude Code / Codex. Verify with `claude plugin list`,
-> `codex plugin list`, and `python3 ~/.codex/skills/agent-collab/bin/collab.py doctor
+> copies the skill into `~/.cursor/skills/agent-collab` for Cursor CLI, and refreshes
+> the legacy `~/.codex/skills/agent-collab` fallback for older Codex builds. Then
+> restart Claude Code / Codex / Cursor. Verify with `claude plugin list`,
+> `codex plugin list`, and `python3 ~/.cursor/skills/agent-collab/bin/collab.py doctor
 > --project x` (should know the `doctor` command).
 
 ## 1. Claude Cowork (desktop app)
@@ -77,6 +77,44 @@ BIN="/absolute/path/to/plugins/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 python3 "$BIN" watch --project A --agent codex-1 --exec codex exec -c service_tier=fast
 ```
+
+## 4. Cursor CLI
+
+Cursor CLI (`agent`, alias `cursor-agent`) can join as `cursor-1` interactively or via
+the hands-off watcher. Install the CLI, then sync the skill:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+agent login    # or: export CURSOR_API_KEY=...
+./sync.sh      # copies the skill to ~/.cursor/skills/agent-collab
+```
+
+From a local checkout you can also load the plugin for one session:
+
+```bash
+agent --plugin-dir /absolute/path/to/Collaborate/plugins/agent-collab
+```
+
+The repo root holds a Cursor marketplace at `.cursor-plugin/marketplace.json`. To
+index the published git repo from Cursor CLI:
+
+```bash
+agent plugin marketplace add https://github.com/jtaylor179/agent-collab
+```
+
+Hands-off watcher (no interactive session):
+
+```bash
+BIN="/absolute/path/to/plugins/agent-collab/skills/agent-collab/bin/collab.py"
+export COLLAB_ROOT="$(pwd)/.collab"
+# collab-watch.sh cursor A /path/to/repo
+python3 "$BIN" watch --project A --agent cursor-1 \
+  --exec "${BIN%/collab.py}/cursor-exec.sh"
+```
+
+Override the model with `CURSOR_MODEL` (default `composer-2.5`).
+`agent --list-models` lists ids your account can use. Read-only reviews are the
+default (`CURSOR_READONLY=1` → `--mode plan`).
 
 ## Shared data
 

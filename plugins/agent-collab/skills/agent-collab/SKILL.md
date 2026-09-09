@@ -46,9 +46,11 @@ every call:
 
 - `COLLAB_BIN` = path to `collab.py`. Resolve in order (first file that exists):
   1. `${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` (Claude plugin)
-  2. `$HOME/.codex/skills/agent-collab/bin/collab.py` (Codex skill copy)
-  3. newest version under `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (`ls | sort -V | tail -1`)
-  4. newest version under `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (same)
+  2. `$HOME/.cursor/skills/agent-collab/bin/collab.py` (Cursor CLI skill copy)
+  3. `$HOME/.codex/skills/agent-collab/bin/collab.py` (Codex skill copy)
+  4. newest version under `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (`ls | sort -V | tail -1`)
+  5. newest version under `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (same)
+  6. newest version under `$HOME/.cursor/plugins/cache/*/agent-collab/*/skills/agent-collab/bin/collab.py` (Cursor plugin cache)
 - `COLLAB_ROOT` = the data dir for the bus. **Use a local-disk path** that every
   participating agent shares. The default is the current repository's `.collab/`
   directory (for direct CLI use: `./.collab`; for `collab-watch.sh`: `<repo-dir>/.collab`).
@@ -56,8 +58,9 @@ every call:
   explicitly only when collaborators intentionally work from different repository roots.
   Avoid a mounted/synced/network folder: SQLite needs file locking, and the CLI will say
   so clearly if the path can't support it.
-- Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires `pip install
-  cursor-sdk` and `CURSOR_API_KEY`). See `references/cursor-start.md`.
+- Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires Cursor CLI
+  `agent` or `cursor-agent` on PATH, or `CURSOR_BIN`; `agent login` or
+  `CURSOR_API_KEY`). See `references/cursor-start.md`.
 - Antigravity watcher adapter: `antigravity-exec.sh` beside `collab.py` (requires `agy`
   on PATH). See `references/antigravity-start.md`.
 
@@ -283,8 +286,9 @@ request already makes it obvious, or a reused profile already set it):
    no default. A project with nothing to review is the #1 failure mode, so this is
    mandatory.
 2. **Reviewers** (multi-select) — `codex-1`, `copilot-1`, `cursor-1`,
-   `antigravity-1`. Note in the option descriptions: Cursor needs
-   `pip install cursor-sdk` + `CURSOR_API_KEY`; Antigravity needs `agy` on PATH.
+   `antigravity-1`. Note in the option descriptions: Cursor needs Cursor CLI
+   (`agent` on PATH, or `CURSOR_BIN`) plus `agent login` or `CURSOR_API_KEY`;
+   Antigravity needs `agy` on PATH.
 3. **Review focus** — e.g. correctness, security, design/architecture, "tear the
    premise apart", or free-text.
 4. **Onboarding mode** — (a) *hands-off watchers I launch in the background*
@@ -435,9 +439,10 @@ Once you have the work product:
    - **Codex:** *"In your Codex session say 'review collab project X', or run
      `collab-watch.sh codex X /path/to/repo`."*
    - **Copilot:** *"Run `collab-watch.sh copilot X /path/to/repo`."*
-   - **Cursor:** *"Run `collab-watch.sh cursor X /path/to/repo` (needs
-     `pip install cursor-sdk` + `CURSOR_API_KEY`), or in Cursor say 'review collab
-     project X' as cursor-1."* — full recipe in `references/cursor-start.md`.
+   - **Cursor:** *"Run `collab-watch.sh cursor X /path/to/repo` (needs Cursor CLI
+     `agent` on PATH, or `CURSOR_BIN`, plus `agent login` or `CURSOR_API_KEY`), or in
+     Cursor / `agent` say 'review collab project X' as cursor-1."* — full recipe in
+     `references/cursor-start.md`.
    - **Antigravity:** *"Run `collab-watch.sh antigravity X /path/to/repo` (or
      `collab-watch.sh agy X …`), or in Antigravity say 'review collab project X' as
      antigravity-1."* — full recipe in `references/antigravity-start.md`.
@@ -548,7 +553,7 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent claude-1  --exec claude --print --permission-mode dontAsk --no-chrome --no-session-persistence
 # Copilot: use the adapter's validated non-streaming JSONL transport:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec "${COLLAB_BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo
-# Cursor: Cursor Agent SDK via cursor-exec.sh (stdin JSON, like Codex):
+# Cursor: Cursor CLI via cursor-exec.sh (prompt-as-arg, like Copilot/agy):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 --exec "${COLLAB_BIN%/collab.py}/cursor-exec.sh"
 # Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent antigravity-1 --exec "${COLLAB_BIN%/collab.py}/antigravity-exec.sh"

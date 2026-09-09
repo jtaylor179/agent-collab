@@ -22,6 +22,8 @@
 # neither command is evaluated by a shell.
 # Extra Claude flags can be passed via COLLAB_CLAUDE_EXEC_ARGS; Claude always runs in
 # print mode, with non-interactive permissions, no browser, and no saved sessions.
+# Cursor uses cursor-exec.sh → `agent -p` (or `cursor-agent`). Set CURSOR_BIN to
+# pin the binary; CURSOR_MODEL and CURSOR_READONLY work like the other adapters.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HERE/collab.py"
@@ -67,6 +69,14 @@ case "$agent_arg" in
     ;;
   *) echo "unknown agent '$agent_arg' (use 'copilot', 'codex', 'claude', 'cursor', 'antigravity', or 'agy')" >&2; exit 2;;
 esac
+
+# Cursor CLI must be on PATH (or CURSOR_BIN) and authenticated before `watch`
+# joins/claims work. `agent status` exits 0 even when logged out, so the adapter
+# parses isAuthenticated. CURSOR_API_KEY skips the login check. Set
+# COLLAB_CURSOR_AUTH_PREFLIGHT=0 only for a known nonstandard auth path.
+if [ "$agent" = "cursor-1" ] && [ "${COLLAB_CURSOR_AUTH_PREFLIGHT:-1}" != "0" ]; then
+  "$HERE/cursor-exec.sh" --preflight
+fi
 
 # Claude Code can be authenticated through the host keychain while a sandboxed caller
 # cannot see that credential. Check in this exact launcher context BEFORE `watch`

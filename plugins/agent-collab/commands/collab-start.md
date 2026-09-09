@@ -20,8 +20,9 @@ Steps:
    the work product as v1, then broadcast a `review_request` (round 1) referencing
    `name@v1`.
 4. Tell the user the project is started and how the named reviewer joins:
-   - **Cursor:** `collab-watch.sh cursor <project> <repo>` (needs `cursor-sdk` +
-     `CURSOR_API_KEY`) or interactive *"review collab project X as cursor-1"* — see
+   - **Cursor:** `collab-watch.sh cursor <project> <repo>` (needs Cursor CLI `agent`
+     on PATH, or `CURSOR_BIN`, plus `agent login` or `CURSOR_API_KEY`) or
+     interactive *"review collab project X as cursor-1"* — see
      `references/cursor-start.md`.
    - **Antigravity:** `collab-watch.sh antigravity <project> <repo>` (or `agy`) or
      interactive *"review collab project X as antigravity-1"* — see

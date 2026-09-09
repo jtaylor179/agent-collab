@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push the current repo version of agent-collab into your ACTIVE installs so the
-# running Claude/Codex actually use it (installs don't auto-update when the repo changes).
+# running Claude/Codex/Cursor actually use it (installs don't auto-update when the repo changes).
 # Run this on your machine after pulling changes.
 #
 #   ./sync.sh
@@ -89,6 +89,27 @@ if ! head -1 "$COPILOT_DEST/SKILL.md" | grep -q "Copilot install"; then
     "$(cat "$COPILOT_DEST/SKILL.md")" > "$COPILOT_DEST/SKILL.md"
 fi
 python3 "$COPILOT_DEST/bin/collab.py" --help >/dev/null && echo "synced Copilot skill -> $COPILOT_DEST (defaults to copilot-1)"
+
+# --- Cursor CLI: copy the skill so `agent` discovers it at ~/.cursor/skills ---
+echo "== Cursor CLI =="
+CURSOR_DEST="$HOME/.cursor/skills/agent-collab"
+mkdir -p "$CURSOR_DEST"
+cp -R "$PLUGIN/skills/agent-collab/." "$CURSOR_DEST/"
+cp "$PLUGIN/AGENTS.md" "$CURSOR_DEST/AGENTS.md"
+cp "$PLUGIN/CURSOR.md" "$CURSOR_DEST/CURSOR.md" 2>/dev/null || true
+cp "$PLUGIN/ANTIGRAVITY.md" "$CURSOR_DEST/ANTIGRAVITY.md" 2>/dev/null || true
+if ! head -1 "$CURSOR_DEST/SKILL.md" | grep -q "Cursor install"; then
+  printf '%s\n\n%s\n' \
+    "> **Cursor install:** your identity here is \`cursor-1\` unless \$COLLAB_AGENT is set. Never act as \`claude-1\`." \
+    "$(cat "$CURSOR_DEST/SKILL.md")" > "$CURSOR_DEST/SKILL.md"
+fi
+python3 "$CURSOR_DEST/bin/collab.py" --help >/dev/null && echo "synced Cursor skill -> $CURSOR_DEST (defaults to cursor-1)"
+if command -v agent >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then
+  echo "  Cursor CLI is on PATH. For a one-off session: agent --plugin-dir $PLUGIN"
+  echo "  >>> Restart Cursor / agent to load the skill."
+else
+  echo "(agent / cursor-agent not found on PATH; skill copied anyway. Install Cursor CLI: curl https://cursor.com/install -fsS | bash)"
+fi
 
 echo
 echo "=============================================================="

@@ -8,9 +8,12 @@ below.
 ## Prerequisites (tell the human once)
 
 ```bash
-pip install cursor-sdk
-export CURSOR_API_KEY=...   # from Cursor dashboard / SDK docs
+# Cursor CLI: https://cursor.com/docs/cli/overview
+curl https://cursor.com/install -fsS | bash   # installs `agent` (cursor-agent is an alias)
+agent login                                   # or: export CURSOR_API_KEY=...
 export COLLAB_ROOT="$(pwd)/.collab"
+# Optional: pin the binary if it is not on PATH
+# export CURSOR_BIN=/path/to/agent
 ```
 
 ## Resolve paths (works from Claude or Codex)
@@ -19,7 +22,9 @@ export COLLAB_ROOT="$(pwd)/.collab"
 export COLLAB_ROOT="${COLLAB_ROOT:-$PWD/.collab}"
 for _p in \
   "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/agent-collab/bin/collab.py}" \
+  "$HOME/.cursor/skills/agent-collab/bin/collab.py" \
   "$HOME/.codex/skills/agent-collab/bin/collab.py" \
+  "$(ls -d "$HOME/.cursor/plugins/cache/"*"/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)" \
   "$(ls -d "$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)" \
   "$(ls -d "$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/"*"/skills/agent-collab/bin/collab.py" 2>/dev/null | sort -V | tail -1)"
 do
@@ -50,15 +55,21 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project <project> \
   --agent cursor-1 --exec "$COLLAB_CURSOR_EXEC"
 ```
 
-Defaults: `CURSOR_READONLY=1` (plan mode), `CURSOR_MODEL=composer-2.5`.
+Defaults: `CURSOR_READONLY=1` (`--mode plan`), `CURSOR_MODEL=composer-2.5`.
+Override the model with `CURSOR_MODEL` (`agent --list-models` shows ids for the
+logged-in account). Set `CURSOR_READONLY=0` for edit-capable runs (`--force`).
 
 ## Path B — interactive Cursor session
 
-In a **Cursor** chat (not Claude/Codex):
+In **Cursor IDE chat** or **Cursor CLI** (`agent`):
 
 > Review collab project `<project>`. Act as **cursor-1**. Use
 > repository-local `COLLAB_ROOT=./.collab`. Run `doctor`, `join`, drain inbox with `claim` →
 > `complete`. Read the skill `agent-collab` / `CURSOR.md`.
+
+Load the plugin for a one-off CLI session with
+`agent --plugin-dir /path/to/plugins/agent-collab`. After `./sync.sh`, the skill also
+lives at `~/.cursor/skills/agent-collab`.
 
 ## Identity rule
 
