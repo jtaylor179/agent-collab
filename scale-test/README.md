@@ -54,22 +54,29 @@ verification, re-point that identity at `Tool="cursor"` and keep the experiment 
 `probe.py` drives each worker model through its adapter directly — no bus, no watchers —
 so a failure is attributable to the model. Measured on this host:
 
-| Model | Tool | H3 (LRU+TTL) | H2 (unicode) | secs |
-|---|---|---|---|---|
-| composer-2.5 | Cursor | **pass** | **pass** | 44 / 49 |
-| grok 4.6 | Cursor | **pass** | — | 129 |
-| gemini-3.8-flash-high | Cursor | **pass** | — | 98 |
-| claude-haiku-4-5 | Claude | **pass** | **pass** | 61 / 80 |
-| claude-sonnet-5 | Claude | **pass** | — | 34 |
-| gpt-5.6-luna / terra | Codex | blocked | — | — |
-| gpt-5.6-luna / terra | Copilot | blocked | — | — |
+Sorted by wall-clock, fastest first:
+
+| Model | Tool | Tier | H3 (LRU+TTL) | H2 (unicode) | secs |
+|---|---|---|---|---|---|
+| gpt-5.6-terra | Codex | smart | **pass** | — | 19 |
+| gpt-5.6-luna | Codex | cheap | **pass** | — | 31 |
+| claude-sonnet-5 | Claude | smart | **pass** | — | 34 |
+| composer-2.5 | Cursor | cheap | **pass** | **pass** | 44 / 49 |
+| claude-haiku-4-5 | Claude | cheap | **pass** | **pass** | 61 / 80 |
+| gemini-3.8-flash-high | Cursor | smart | **pass** | — | 98 |
+| grok 4.6 | Cursor | smart | **pass** | — | 129 |
+| gpt-5.6-luna / terra | Copilot | — | blocked on Windows | — | — |
 
 Pass means the **held-out** test, not the visible one.
 
-**The headline: the hard band does not discriminate.** Every reachable model, including
-the two cheapest, cleared both hard tasks first try. For self-contained, well-specified,
-pure-function work, the cheap tier is sufficient and the smart tier is wasted money —
-`composer-2.5` was also the *fastest* at 44s, beating grok 4.6 at 129s.
+**The headline: the hard band does not discriminate.** All seven reachable models —
+every cheap one included — cleared it first try, and the two H2 attempts passed too.
+For self-contained, well-specified, pure-function work the cheap tier is sufficient and
+the smart tier is wasted money.
+
+**Latency does not track price either.** The cheapest Codex model finished in 31s while
+the smart-tier grok 4.6 took 129s — 4x slower for the same verified-correct answer. If
+you are optimizing wall-clock, measure it; do not assume the expensive model is quicker.
 
 So the cost lever here is **not** model tier. It is specification quality: the architect
 writing a tight contract is what makes cheap workers viable. To find the actual ceiling
@@ -78,8 +85,10 @@ deliberately ambiguous specs, changes requiring you to read existing code first.
 the current 12 tasks as a **floor check** (does the fleet work at all?) rather than a
 tier-selection instrument.
 
-Blocked rows are environmental, not capability: Codex reports `gpt-5.6-luna requires a
-newer version of Codex`, and Copilot's adapter cannot run natively on Windows.
+The one remaining blocked row is environmental, not capability: Copilot's adapter cannot
+run natively on Windows. Codex was blocked the same way until the CLI was upgraded --
+it had reported `gpt-5.6-luna requires a newer version of Codex` -- so treat a blocked
+row as a toolchain question before you conclude anything about the model.
 
 ## Running it
 
@@ -127,16 +136,20 @@ each response to its task through `parent_message_id`.
 
 Ranked by impact on cost and latency.
 
-1. **The Cursor adapter's default mode silently produces nothing.** `CURSOR_READONLY`
-   defaults to `1`, which becomes `--mode plan`. On a substantive task that returns
+1. ~~**The Cursor adapter's default mode silently produced nothing.**~~ **Fixed in v0.4.16.**
+   `CURSOR_READONLY=1` mapped to `--mode plan`, which on a substantive task returned
    **empty stdout with exit 0** — measured: 1 character in `plan` vs 4231 in `ask` for the
-   same prompt. A watcher cannot tell that from success, so it posts an empty response and
-   acks the task: work silently lost, and the queue drains looking healthy. This is the
-   most dangerous item on the list because it fails *open*.
-   Suggested: for worker duty default to `--mode ask` (still read-only, it does not touch
-   the workspace) and treat empty adapter output as a handler failure so the message is
-   released rather than acked. `collab watch --output-admission-argv` can enforce this
-   today, but it is opt-in and nothing points you at it.
+   same prompt. A watcher could not tell that from success, so it posted an empty response
+   and acked the task: work silently lost while the queue drained looking healthy. It
+   failed *open*, which is why nobody noticed.
+   Read-only duty now uses `--mode ask`, verified equally read-only against a sandbox
+   (creates no files, overwrites none, while `CURSOR_READONLY=0` does write).
+   **Still open:** empty adapter output is not itself treated as a handler failure, so a
+   different adapter could reintroduce the same silent loss. `collab watch
+   --output-admission-argv` can enforce non-empty output today, but it is opt-in and
+   nothing points you at it. `antigravity-exec.sh` has the identical
+   `ANTIGRAVITY_READONLY=1 → --mode plan` shape and is probably affected; it was left
+   alone rather than changed untested, since `agy` was not reachable here.
 
 2. **No tier escalation.** `collab retry --message M --agent A` redelivers to the *same*
    recipient — there is no cheap→smart handoff. This is the single biggest cost lever and

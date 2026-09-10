@@ -119,9 +119,10 @@ if ($Verify) {
     Write-Output ("{0,-17} {1,-8} {2,-28} {3}" -f $a.Id, $a.Tool, $a.Model, $status)
   }
   Write-Output ""
-  Write-Output "Only Cursor-hosted rows are probed live. Cursor also exposes gpt-5.6-luna-*,"
-  Write-Output "gpt-5.6-terra-*, gemini-3.8-flash-* and claude-* -- so if a Codex/Copilot row"
-  Write-Output "fails, you can re-point that identity at Tool='cursor' and keep the roster."
+  Write-Output "Cursor and Codex rows are probed live; Claude rows check auth. A blocked row"
+  Write-Output "is usually a toolchain problem, not a bad model -- Codex rejected gpt-5.6-*"
+  Write-Output "until its CLI was upgraded. Cursor also exposes gpt-5.6-luna-*, gpt-5.6-terra-*,"
+  Write-Output "gemini-3.8-flash-* and claude-*, so you can re-point a stuck identity there."
   return
 }
 
