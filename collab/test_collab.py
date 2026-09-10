@@ -3129,12 +3129,14 @@ class TestCursorExecAdapter(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         return json.loads(out.stdout)
 
-    def test_defaults_to_plan_mode_composer_and_text_print(self):
+    def test_defaults_to_ask_mode_composer_and_text_print(self):
         args = self._run()
         self.assertEqual(args[0], "--print")
         self.assertEqual(args[args.index("--output-format") + 1], "text")
         self.assertIn("--trust", args)
-        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        # Read-only duty is `ask`, never `plan`: plan mode returns empty stdout with
+        # exit 0 on real work, which the watcher would ack as a success.
+        self.assertEqual(args[args.index("--mode") + 1], "ask")
         self.assertEqual(args[args.index("--model") + 1], "composer-2.5")
         self.assertNotIn("--force", args)
         self.assertEqual(args[-1], "review payload")
@@ -3214,14 +3216,16 @@ class TestCursorExecPythonAdapter(unittest.TestCase):
             [sys.executable, self.ADAPTER, *(extra_args or [])],
             input=stdin, capture_output=True, text=True, env=env, timeout=30)
 
-    def test_defaults_to_plan_mode_composer_and_text_print(self):
+    def test_defaults_to_ask_mode_composer_and_text_print(self):
         args = self._build()
         self.assertEqual(args[0], "agent")
         self.assertEqual(args[1], "--print")
         self.assertEqual(args[args.index("--output-format") + 1], "text")
         self.assertIn("--trust", args)
         self.assertEqual(args[args.index("--workspace") + 1], "/repo")
-        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        # Read-only duty is `ask`, never `plan`: plan mode returns empty stdout with
+        # exit 0 on real work, which the watcher would ack as a success.
+        self.assertEqual(args[args.index("--mode") + 1], "ask")
         self.assertEqual(args[args.index("--model") + 1], "composer-2.5")
         self.assertNotIn("--force", args)
         self.assertEqual(args[-1], "review payload")

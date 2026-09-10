@@ -16,7 +16,7 @@
 #
 # Requires: Cursor CLI on PATH (`agent` or `cursor-agent`), or CURSOR_BIN.
 # Auth: `agent login` or CURSOR_API_KEY. Read-only by default
-# (CURSOR_READONLY=1 → --mode plan). Override model with CURSOR_MODEL
+# (CURSOR_READONLY=1 → --mode ask). Override model with CURSOR_MODEL
 # (default: composer-2.5). Friendly names like "grok 4.6" and
 # "composer 2.5" are mapped to CLI ids. Extra args are forwarded
 # ahead of the prompt.
@@ -134,7 +134,12 @@ CWD="${COLLAB_CWD:-$PWD}"
 readonly_args=()
 force_args=()
 if [ "${CURSOR_READONLY:-1}" != "0" ]; then
-  readonly_args=(--mode plan)
+  # `ask`, not `plan`: plan mode returns EMPTY stdout with exit 0 on a substantive
+  # task (measured 1 char vs 4231 for the same prompt), which a watcher cannot tell
+  # from success -- it would ack the message and silently drop the work. `ask` is
+  # equally read-only (verified: creates no files, overwrites none). Explicit plans
+  # stay available via CURSOR_AGENT_MODE=plan. Keep in step with cursor-exec.py.
+  readonly_args=(--mode ask)
 else
   force_args=(--force)
 fi

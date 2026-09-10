@@ -55,7 +55,7 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project <project> \
   --agent cursor-1 --exec "$COLLAB_CURSOR_EXEC"
 ```
 
-Defaults: `CURSOR_READONLY=1` (`--mode plan`), `CURSOR_MODEL=composer-2.5`.
+Defaults: `CURSOR_READONLY=1` (`--mode ask`), `CURSOR_MODEL=composer-2.5`.
 Override the model with `CURSOR_MODEL`. Friendly names work (`grok 4.6`,
 `composer 2.5`, `grok 4.6 fast`); they map to CLI ids (`cursor-grok-4.6-high`,
 `composer-2.5`, `cursor-grok-4.6-high-fast`). `agent --list-models` shows every

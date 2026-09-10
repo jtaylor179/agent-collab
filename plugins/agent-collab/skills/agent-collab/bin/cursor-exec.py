@@ -18,7 +18,7 @@ Usage:
 
 Requires: Cursor CLI on PATH (`agent` or `cursor-agent`), or CURSOR_BIN.
 Auth: `agent login` or CURSOR_API_KEY. Read-only by default
-(CURSOR_READONLY=1 -> --mode plan). Override model with CURSOR_MODEL
+(CURSOR_READONLY=1 -> --mode ask). Override model with CURSOR_MODEL
 (default: composer-2.5). Friendly names like "grok 4.6" and "composer 2.5"
 are mapped to CLI ids. Extra args are forwarded ahead of the prompt.
 """
@@ -153,7 +153,14 @@ def build_command(binary, extra_args, prompt, cwd):
     readonly_args = []
     force_args = []
     if os.environ.get("CURSOR_READONLY", "1") != "0":
-        readonly_args = ["--mode", "plan"]
+        # `ask`, not `plan`. Plan mode returns EMPTY stdout with exit 0 on a
+        # substantive task (measured: 1 char vs 4231 for the same prompt), which a
+        # watcher cannot distinguish from success -- it would ack the message and
+        # silently drop the work. `ask` is equally read-only: verified against a
+        # sandbox that it creates no files and overwrites none, while the same probe
+        # under CURSOR_READONLY=0 did write. Explicit plans stay available via
+        # CURSOR_AGENT_MODE=plan.
+        readonly_args = ["--mode", "ask"]
     else:
         force_args = ["--force"]
 

@@ -76,7 +76,7 @@ assistant content.
 For Cursor, install Cursor CLI (`curl https://cursor.com/install -fsS | bash`) so
 `agent` or `cursor-agent` is on PATH, then `agent login` (or set `CURSOR_API_KEY`).
 Pin a non-PATH binary with `CURSOR_BIN`. Read-only by default (`CURSOR_READONLY=1`
-→ `--mode plan`). Override model with `CURSOR_MODEL` (default `composer-2.5`).
+→ `--mode ask`). Override model with `CURSOR_MODEL` (default `composer-2.5`).
 Friendly names (`grok 4.6`, `composer 2.5`) map to CLI ids; `agent --list-models`
 lists ids for the account. The launcher runs
 `cursor-exec.sh --preflight` before claiming work; set

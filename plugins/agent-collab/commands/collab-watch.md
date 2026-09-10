@@ -32,7 +32,7 @@ Steps:
      `COLLAB_CODEX_EXEC_ARGS`.
    - **Cursor:** `cursor-exec.sh` → Cursor CLI `agent -p` (prompt-as-arg). Requires
      `agent` or `cursor-agent` on PATH (or `CURSOR_BIN`) and `agent login` or
-     `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1` → `--mode plan`).
+     `CURSOR_API_KEY`. Read-only by default (`CURSOR_READONLY=1` → `--mode ask`).
      Override model with `CURSOR_MODEL` (default `composer-2.5`; friendly names
      like `grok 4.6` map to `cursor-grok-4.6-high`).
    - **Antigravity:** `antigravity-exec.sh` → `agy --print` (prompt-as-arg). Requires
