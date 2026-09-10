@@ -18,6 +18,8 @@
 # Model override: ANTIGRAVITY_MODEL or AGY_MODEL (default: unset, agy picks).
 # Read-only by default: ANTIGRAVITY_READONLY=1 → --mode plan. Set to 0 for
 # accept-edits mode. Non-interactive runs need --dangerously-skip-permissions.
+# Print timeout: ANTIGRAVITY_PRINT_TIMEOUT or AGY_PRINT_TIMEOUT (default 20m; agy's
+# own default of 5m silently truncates tool-using reviews to an empty answer).
 set -euo pipefail
 AGY_BIN="${AGY_BIN:-agy}"
 MODEL="${ANTIGRAVITY_MODEL:-${AGY_MODEL:-}}"
@@ -31,6 +33,14 @@ model_args=()
 if [ -n "$MODEL" ]; then
   model_args=(--model "$MODEL")
 fi
+
+# agy's --print-timeout defaults to 5m, and on expiry it returns EMPTY stdout with
+# exit 0 and "print timeout ... returning partial output" on stderr -- the same
+# fail-open shape as the permission denial below. A review that has to run tools
+# routinely needs longer than 5m, so raise the ceiling and let the operator tune it.
+# Keep this at or below `collab watch --agent-timeout`, which kills the whole run.
+timeout_args=(--print-timeout
+  "${ANTIGRAVITY_PRINT_TIMEOUT:-${AGY_PRINT_TIMEOUT:-20m}}")
 
 prompt="$(cat)"
 if [ -z "$prompt" ]; then
@@ -48,6 +58,7 @@ fi
 # ${arr[@]+"${arr[@]}"} = bash-3.2-safe expansion of a possibly-empty array under set -u.
 set +e
 answer="$("$AGY_BIN" --print --dangerously-skip-permissions \
+  ${timeout_args[@]+"${timeout_args[@]}"} \
   ${readonly_args[@]+"${readonly_args[@]}"} \
   ${model_args[@]+"${model_args[@]}"} \
   "$@" -p "$prompt")"

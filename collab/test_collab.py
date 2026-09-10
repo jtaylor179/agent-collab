@@ -3360,7 +3360,8 @@ class TestAntigravityExecAdapter(unittest.TestCase):
             env = os.environ.copy()
             env["AGY_BIN"] = fake
             for key in ("ANTIGRAVITY_MODEL", "AGY_MODEL",
-                        "ANTIGRAVITY_READONLY", "AGY_READONLY"):
+                        "ANTIGRAVITY_READONLY", "AGY_READONLY",
+                        "ANTIGRAVITY_PRINT_TIMEOUT", "AGY_PRINT_TIMEOUT"):
                 env.pop(key, None)
             env.update(env_overrides or {})
             return subprocess.run(
@@ -3401,6 +3402,19 @@ class TestAntigravityExecAdapter(unittest.TestCase):
         args = json.loads(
             self._invoke(self.ECHO_ARGV, env_overrides={"ANTIGRAVITY_READONLY": "0"}).stdout)
         self.assertNotIn("--mode", args)
+
+    def test_print_timeout_overrides_agys_five_minute_default(self):
+        # agy's own default is 5m, and on expiry it returns empty stdout with exit 0 --
+        # measured, once tool permissions were granted and reviews started doing work.
+        args = json.loads(self._invoke(self.ECHO_ARGV).stdout)
+        self.assertEqual(args[args.index("--print-timeout") + 1], "20m")
+
+    def test_print_timeout_is_tunable(self):
+        for var in ("ANTIGRAVITY_PRINT_TIMEOUT", "AGY_PRINT_TIMEOUT"):
+            with self.subTest(var=var):
+                args = json.loads(
+                    self._invoke(self.ECHO_ARGV, env_overrides={var: "45m"}).stdout)
+                self.assertEqual(args[args.index("--print-timeout") + 1], "45m")
 
 
 @unittest.skipIf(os.name == "nt", "Copilot shell adapter requires POSIX")
