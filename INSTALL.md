@@ -5,12 +5,13 @@ The plugin source lives in `plugins/agent-collab/`. A prebuilt archive is in
 
 > **Upgrading? Installs do not auto-update.** If you installed an earlier version, the
 > running Claude/Codex/Cursor keep using the old copy until you re-sync. The fastest way is to
-> run **`./sync.sh`** from this directory — it refreshes the Claude marketplace,
-> installs `agent-collab@agent-collab-marketplace` as a native global Codex plugin,
-> copies the skill into `~/.cursor/skills/agent-collab` for Cursor CLI, and refreshes
-> the legacy `~/.codex/skills/agent-collab` fallback for older Codex builds. Then
-> restart Claude Code / Codex / Cursor. Verify with `claude plugin list`,
-> `codex plugin list`, and `python3 ~/.cursor/skills/agent-collab/bin/collab.py doctor
+> run **`./sync.sh`** on POSIX, or **`./sync.ps1`** on Windows, from this directory — it
+> refreshes the Claude marketplace (`sync.sh` only), installs
+> `agent-collab@agent-collab-marketplace` as a native global Codex plugin, copies the
+> skill into `~/.cursor/skills/agent-collab` for Cursor CLI, and refreshes the legacy
+> `~/.codex/skills/agent-collab` fallback for older Codex builds. Then restart Claude
+> Code / Codex / Cursor. Verify with `claude plugin list`, `codex plugin list`, and
+> `python3 ~/.cursor/skills/agent-collab/bin/collab.py doctor
 > --project x` (should know the `doctor` command).
 
 ## 1. Claude Cowork (desktop app)
@@ -62,13 +63,15 @@ codex plugin add agent-collab@agent-collab-marketplace
 codex plugin list      # should show agent-collab as enabled
 ```
 
-`./sync.sh` runs those commands for the local checkout and should be the normal upgrade
-path. Restart Codex after installing so the plugin-provided skill is loaded.
+`./sync.sh` (POSIX) and `./sync.ps1` (Windows) run the Codex update for the local
+checkout and should be the normal upgrade path. Restart Codex after installing so the
+plugin-provided skill is loaded.
 
-**b) AGENTS.md (simplest, no install).** Copy `plugins/agent-collab/AGENTS.md` to the
-root of the repo you're reviewing (or to `~/.codex/AGENTS.md`). Codex reads it
-automatically and will understand "join collab project X". Copilot users: paste the
-same content into custom instructions.
+**b) Project-local AGENTS.md fallback (no install).** Copy
+`plugins/agent-collab/AGENTS.md` to the root of the repo you're reviewing. Avoid
+putting it in `~/.codex/AGENTS.md`: the native global plugin provides scoped discovery
+without injecting collaboration instructions into unrelated tasks. Copilot users can
+paste the same content into project-specific custom instructions.
 
 **c) Hands-off watcher (no install at all).** From any checkout:
 
@@ -77,6 +80,15 @@ BIN="/absolute/path/to/plugins/agent-collab/skills/agent-collab/bin/collab.py"
 export COLLAB_ROOT="$HOME/.collab"   # one shared root, same in every agent
 python3 "$BIN" watch --project A --agent codex-1 --exec codex exec -c service_tier=fast
 ```
+
+Native Windows/PowerShell can use the bundled cross-platform launcher:
+
+```powershell
+python .\plugins\agent-collab\skills\agent-collab\bin\collab-watch.py codex A C:\path\to\repo
+```
+
+Codex and Cursor watchers run natively on Windows. The Copilot and Antigravity watcher
+adapters currently require WSL or Git Bash.
 
 ## 4. Cursor CLI
 

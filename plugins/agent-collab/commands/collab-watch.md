@@ -15,8 +15,9 @@ If the agent or project is missing, ask — do not guess the project name.
 
 Steps:
 
-1. Resolve `collab-watch.sh` next to `collab.py` (see skill for path resolution). Run:
-   `collab-watch.sh <agent> <project> [repo-dir]`
+1. Resolve the watcher next to `collab.py` (see skill for path resolution). Run
+   `collab-watch.sh <agent> <project> [repo-dir]` on POSIX, or
+   `python collab-watch.py <agent> <project> [repo-dir]` on any platform.
    (defaults: `COLLAB_ROOT=<repo-dir>/.collab`, repo-dir = current dir).
    - **Copilot:** `copilot-exec.sh` adapter, model `claude-opus-4.8`, reasoning
      effort `high`, read-only by default. Override with `COPILOT_MODEL`
@@ -43,8 +44,9 @@ Steps:
    symptom). It prints `{"detached": true, "pid": N, "log": …}` and returns immediately; tail the
    log to watch progress. Only skip detach for a foreground watcher in a terminal you keep
    open.
-3. Report agent/project/root and how to stop it (`pkill -f "watch --project <project>"`).
+3. Report agent/project/root and how to stop it (`pkill -f "watch --project <project>"`
+   on POSIX; `Stop-Process -Id <pid>` for a detached watcher on Windows).
 4. Optional: `COLLAB_WATCH_ARGS="--idle-exit"` to drain the queue then exit.
-4. Distinct ids: `copilot-1` / `codex-1` / **`claude-1`** / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
+5. Distinct ids: `copilot-1` / `codex-1` / **`claude-1`** / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
 
 After launching, suggest `/collab-status <project>` or `log --follow`.

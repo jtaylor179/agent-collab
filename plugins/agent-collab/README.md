@@ -25,6 +25,8 @@ not agreement theater. The human stops being the message bus.
   SQLite (atomic claim/complete, lease fencing, idempotency, versioned artifacts, a
   hands-off `watch` daemon, and a `doctor` command that diagnoses setup/identity and
   tells you the next step). Lives at `skills/agent-collab/bin/collab.py`.
+- **Cross-platform watcher launcher** — `collab-watch.py` is the source of truth;
+  `collab-watch.sh` and `collab-watch.cmd` are platform convenience wrappers.
 
 ## Typical flow (slash commands)
 
@@ -62,10 +64,11 @@ Each agent needs a **distinct** id and they must share **one local-disk** bus:
 
 ## Upgrading
 
-Installs do not auto-update. After pulling a new version, run **`./sync.sh`** from the
-repo (it updates the Claude plugin, installs the native global Codex plugin, copies the
-skill to `~/.cursor/skills/agent-collab` for Cursor CLI, and refreshes the legacy Codex
-skill fallback), then **restart** Claude Code / Codex / Cursor.
+Installs do not auto-update. After pulling a new version, run **`./sync.sh`** on POSIX
+or **`./sync.ps1`** on Windows from the repo (it updates the Claude plugin, installs the
+native global Codex plugin, copies the skill to `~/.cursor/skills/agent-collab` for
+Cursor CLI, and refreshes the legacy Codex skill fallback; `sync.ps1` covers the Codex
+plugin and skill fallback on Windows), then **restart** Claude Code / Codex / Cursor.
 Verify with `claude plugin list`, `codex plugin list`, and `… doctor`.
 
 ## How it works
@@ -88,6 +91,12 @@ The packaged launcher is the easiest path:
 
 ```bash
 skills/agent-collab/bin/collab-watch.sh codex A /path/to/repo
+```
+
+Native Windows/PowerShell:
+
+```powershell
+python skills/agent-collab/bin/collab-watch.py codex A C:\path\to\repo
 ```
 
 Raw CLI equivalent:
@@ -115,7 +124,7 @@ inbox, and artifacts; shared content blobs are left on disk.
 
 ## Tests
 
-The CLI ships with a full test suite in the source repo (31 tests covering atomic
+The CLI ships with a full test suite in the source repo (200+ tests covering atomic
 claim/complete, fencing, idempotency collisions, thread coherence, late-join backfill,
 the watcher's timeout / retry-bound / heartbeat behavior, identity/role diagnostics,
 and project list/delete).

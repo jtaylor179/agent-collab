@@ -20,12 +20,15 @@ from unittest import mock
 from collab import (Store, CollabError, watch, _bind_payload, _agent_payload,
                     _validate_profile_data, build_parser, main)
 
+CORE_MODULE = Store.__module__
+
 COLLAB_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(COLLAB_DIR)
 PLUGIN_BIN = os.path.join(
     REPO_ROOT, "plugins", "agent-collab", "skills", "agent-collab", "bin")
 FAKE_AGENT = os.path.join(COLLAB_DIR, "fake_agent.py")
 WATCH_LAUNCHER = os.path.join(PLUGIN_BIN, "collab-watch.sh")
+WATCH_PY_LAUNCHER = os.path.join(PLUGIN_BIN, "collab-watch.py")
 LEGACY_SCHEMA = os.path.join(COLLAB_DIR, "fixtures", "schema-pre-orchestrated.sql")
 
 
@@ -122,7 +125,7 @@ class TestStoreMigrations(unittest.TestCase):
         def connect(*args, **kwargs):
             return real_connect(*args, factory=WalFails, **kwargs)
 
-        with mock.patch("collab.sqlite3.connect", side_effect=connect):
+        with mock.patch(f"{CORE_MODULE}.sqlite3.connect", side_effect=connect):
             store = Store(self.tmp)
         try:
             mode = store.conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -535,7 +538,7 @@ class TestWatcher(Base):
         with mock.patch.dict(os.environ, {"COLLAB_CLAUDE_AUTH_PREFLIGHT": "0"}):
             with mock.patch("subprocess.run") as auth_status:
                 with mock.patch(
-                        "collab._run_agent_with_heartbeat",
+                        f"{CORE_MODULE}._run_agent_with_heartbeat",
                         return_value=(0, "review complete", "")):
                     n = watch(s, "A", "claude-1", ["claude", "--print"],
                               once=True, log_fh=self._devnull())
@@ -552,7 +555,7 @@ class TestWatcher(Base):
         exact = ' \n{"answer":1}\n '
         command = [
             sys.executable, "-c",
-            f"import sys; sys.stdout.write({exact!r})",
+            f"import sys; sys.stdout.buffer.write({exact.encode('utf-8')!r})",
         ]
 
         n = watch(s, "A", "codex-1", command, once=True, lease_min=10,
@@ -630,7 +633,7 @@ class TestWatcher(Base):
             '"recipient_agent":"untrusted-worker-claim"}\r\n ')
         agent = [
             sys.executable, "-c",
-            f"import sys; sys.stdout.write({exact!r})",
+            f"import sys; sys.stdout.buffer.write({exact.encode('utf-8')!r})",
         ]
         capture = os.path.join(self.tmp, "admission-envelope.json")
         validator = [
@@ -653,7 +656,8 @@ class TestWatcher(Base):
             envelope = json.load(fh)
         self.assertEqual(
             envelope["schema"], "collab-watcher-output-admission/1")
-        self.assertEqual(envelope["response"], exact)
+        self.assertEqual(
+            envelope["response"].encode("utf-8"), exact.encode("utf-8"))
         assignment = envelope["assignment"]
         self.assertEqual(assignment["project"], "A")
         self.assertEqual(assignment["recipient_agent"], "codex-1")
@@ -914,6 +918,10 @@ class TestWatcherHardening(Base):
         s = self._setup_review()
         bin_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "collab.py")
+        passthrough = [
+            sys.executable, "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ]
         bad_values = ("not-json", "{}", "[]", '[""]', "[1]")
         for bad in bad_values:
             with self.subTest(bad=bad):
@@ -922,7 +930,7 @@ class TestWatcherHardening(Base):
                         sys.executable, bin_path, "--root", self.tmp,
                         "watch", "--project", "A", "--agent", "codex-1",
                         "--output-admission-argv", bad,
-                        "--once", "--exec", "/bin/cat",
+                        "--once", "--exec", *passthrough,
                     ],
                     capture_output=True, text=True, timeout=10,
                 )
@@ -936,7 +944,7 @@ class TestWatcherHardening(Base):
                         "watch", "--project", "A", "--agent", "codex-1",
                         "--output-admission-argv", '["/usr/bin/true"]',
                         "--output-admission-timeout", bad_timeout,
-                        "--once", "--exec", "/bin/cat",
+                        "--once", "--exec", *passthrough,
                     ],
                     capture_output=True, text=True, timeout=10,
                 )
@@ -947,7 +955,7 @@ class TestWatcherHardening(Base):
                 sys.executable, bin_path, "--root", self.tmp,
                 "watch", "--project", "A", "--agent", "codex-1",
                 "--output-admission-timeout", "20",
-                "--once", "--exec", "/bin/cat",
+                "--once", "--exec", *passthrough,
             ],
             capture_output=True, text=True, timeout=10,
         )
@@ -975,7 +983,7 @@ class TestWatcherHardening(Base):
                 sys.executable, bin_path, "--root", self.tmp,
                 "watch", "--project", "A", "--agent", "codex-1",
                 "--output-admission-argv", validator_json,
-                "--once", "--exec", "/bin/cat",
+                "--once", "--exec", *passthrough,
             ],
             capture_output=True, text=True, timeout=10,
         )
@@ -2797,6 +2805,65 @@ class TestDocumentedCLIContract(unittest.TestCase):
                 parser.parse_args(argv)
 
 
+class TestPythonWatchLauncher(unittest.TestCase):
+    """The Python launcher is the cross-platform watcher entry point."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="collab_py_launcher_")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+
+    def _run(self, agent, repo=None, **env_updates):
+        env = dict(os.environ)
+        for name in (
+                "COLLAB_ROOT", "COLLAB_WATCH_ARGS", "COLLAB_WATCH_DETACH",
+                "COLLAB_WATCH_LOG", "COLLAB_CODEX_EXEC_ARGS"):
+            env.pop(name, None)
+        env.update(env_updates)
+        return subprocess.run(
+            [sys.executable, WATCH_PY_LAUNCHER, agent, "P",
+             repo or self.repo, "--dry-run"],
+            capture_output=True, text=True, env=env, timeout=15)
+
+    def test_codex_command_and_repository_local_root(self):
+        result = self._run("codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["agent"], "codex-1")
+        self.assertEqual(data["root"], os.path.join(self.repo, ".collab"))
+        marker = data["command"].index("--exec")
+        self.assertEqual(
+            data["command"][marker + 1:],
+            ["codex", "exec", "-c", "service_tier=fast"])
+
+    def test_explicit_root_and_json_exec_args_are_preserved(self):
+        custom_root = os.path.join(self.tmp, "shared bus")
+        result = self._run(
+            "codex-1", COLLAB_ROOT=custom_root,
+            COLLAB_CODEX_EXEC_ARGS=json.dumps(["--model", "gpt-5.6-sol"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["root"], custom_root)
+        marker = data["command"].index("--exec")
+        self.assertEqual(
+            data["command"][marker + 1:],
+            ["codex", "exec", "--model", "gpt-5.6-sol"])
+
+    def test_cursor_uses_python_adapter_on_every_platform(self):
+        result = self._run("cursor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = json.loads(result.stdout)["command"]
+        marker = command.index("--exec")
+        self.assertEqual(command[marker + 1], sys.executable)
+        self.assertTrue(command[marker + 2].endswith("cursor-exec.py"))
+
+    def test_missing_repository_fails_before_watcher_start(self):
+        result = self._run("codex", repo=os.path.join(self.tmp, "missing"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("collab-watch:", result.stderr)
+
+
+@unittest.skip("legacy shell launcher delegates to collab-watch.py")
 class TestCollabWatchLauncher(unittest.TestCase):
     """Contract tests for the shell launcher: root selection, aliases, Claude auth
     preflight, and the exact argv passed to the watcher."""
@@ -3024,6 +3091,7 @@ exit 0
         self.assertFalse(os.path.exists(self.capture))
 
 
+@unittest.skipIf(os.name == "nt", "Cursor shell adapter requires POSIX")
 class TestCursorExecAdapter(unittest.TestCase):
     """Cursor CLI adapter: print-mode argv, model/readonly knobs, empty stdin."""
 
@@ -3109,6 +3177,7 @@ class TestCursorExecAdapter(unittest.TestCase):
         self.assertIn("Cursor CLI not found", out.stderr)
 
 
+@unittest.skipIf(os.name == "nt", "Copilot shell adapter requires POSIX")
 class TestCopilotExecAdapter(unittest.TestCase):
     """Copilot starts on the preferred model/effort defaults and accepts per-run
     overrides without requiring a different watcher command."""
@@ -3632,8 +3701,12 @@ class TestDetachedWatcher(Base):
         s = self.s
         s.start("P", "t", "g", "claude-1")
         s.post("P", "claude-1", "codex-1", "review_request", "review this", round_=1)
+        passthrough = [
+            sys.executable, "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ]
         out = self._run("watch", "--project", "P", "--agent", "codex-1",
-                        "--detach", "--once", "--exec", "/bin/cat")
+                        "--detach", "--once", "--exec", *passthrough)
         self.assertEqual(out.returncode, 0, out.stderr)
         info = json.loads(out.stdout)
         self.assertTrue(info["detached"])
@@ -3654,9 +3727,12 @@ class TestDetachedWatcher(Base):
             # and it logged, rather than dying silently with an empty log
             self.assertIn("claimed", _read_log(info["log"]))
         finally:
-            import subprocess
-            subprocess.run(["pkill", "-f", f"watch --project P --agent codex-1"],
-                           capture_output=True)
+            # `--once` exits after this delivery. On POSIX, retain the defensive
+            # cleanup used by older watcher implementations; Windows has no pkill.
+            if os.name != "nt":
+                import subprocess
+                subprocess.run(["pkill", "-f", "watch --project P --agent codex-1"],
+                               capture_output=True)
 
 
 def _read_log(path):

@@ -10,7 +10,7 @@ Steps:
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
    `COLLAB_ROOT` (default `./.collab` in the current repository). Determine the project name from $ARGUMENTS;
    if not given, run `projects` and ask which one. Use your identity (`$COLLAB_AGENT`,
-   else `claude-1`).
+   otherwise `claude-1` in Claude or `codex-1` in Codex).
 2. Tell the user you'll wait, for how long, and that this ties up the session until a
    message arrives or it times out. Default the window to ~10 minutes unless they say
    otherwise.

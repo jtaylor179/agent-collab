@@ -12,7 +12,7 @@ Setup:
 1. Set `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py` and
    `COLLAB_ROOT` (local-disk, default `./.collab` in the current repository — the SAME path every agent uses).
    Determine the project (from $ARGUMENTS or ask) and your identity (`$COLLAB_AGENT`,
-   else `claude-1`).
+   otherwise `claude-1` in Claude or `codex-1` in Codex).
 2. Confirm to the user that you'll self-pace this plan and roughly how (drive each step's
    review to convergence, then advance to the next step) until the plan is done or you
    hit something only they can resolve.

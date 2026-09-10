@@ -2231,12 +2231,18 @@ def _run_output_admission(validator_argv, assignment, agent_payload,
         # This is the exact, untrimmed response string returned by the agent.
         "response": response_body,
     }, ensure_ascii=False)
+    validator_env = os.environ.copy()
+    # JSON exchanged with validators is UTF-8. Python on native Windows otherwise
+    # decodes redirected stdin using the active ANSI code page, corrupting non-ASCII
+    # responses before validation.
+    validator_env["PYTHONIOENCODING"] = "utf-8"
     try:
         proc = subprocess.run(
             validator_argv,
             input=envelope.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=validator_env,
             timeout=timeout,
             check=False,
         )

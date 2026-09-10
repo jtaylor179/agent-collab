@@ -3,9 +3,9 @@ name: agent-collab
 description: >-
   Collaborate with other AI agents (Codex, Copilot, Cursor, Antigravity) on a shared spec or
   codebase through a durable message bus, instead of the human copy/pasting between
-  tools. Use when the user says "start collab project <X>", "start agent-collab with
+  tools. Use when the user says "start collab project X", "start agent-collab with
   cursor", "start collab session with antigravity", "start collab session with agy",
-  "join collab project <X>", "check collab project <X>", asks to get another
+  "join collab project X", "check collab project X", asks to get another
   agent's review through the bus, to send feedback/a rebuttal to another agent, or to
   run a multi-agent convergence loop toward a shared design. A bare invocation with no
   project, file, or reviewers named (e.g. just "agent-collab" or "set up a collab")
@@ -51,9 +51,10 @@ every call:
   4. newest version under `$HOME/.codex/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (`ls | sort -V | tail -1`)
   5. newest version under `$HOME/.claude/plugins/cache/agent-collab-marketplace/agent-collab/*/skills/agent-collab/bin/collab.py` (same)
   6. newest version under `$HOME/.cursor/plugins/cache/*/agent-collab/*/skills/agent-collab/bin/collab.py` (Cursor plugin cache)
+  Use the host shell's native file search; do not run the Bash resolver in PowerShell.
 - `COLLAB_ROOT` = the data dir for the bus. **Use a local-disk path** that every
   participating agent shares. The default is the current repository's `.collab/`
-  directory (for direct CLI use: `./.collab`; for `collab-watch.sh`: `<repo-dir>/.collab`).
+  directory (for direct CLI use: `./.collab`; watcher: `<repo-dir>/.collab`).
   Pass it as `--root "$COLLAB_ROOT"` on every command, or export it once. Set it
   explicitly only when collaborators intentionally work from different repository roots.
   Avoid a mounted/synced/network folder: SQLite needs file locking, and the CLI will say
@@ -64,10 +65,11 @@ every call:
 - Antigravity watcher adapter: `antigravity-exec.sh` beside `collab.py` (requires `agy`
   on PATH). See `references/antigravity-start.md`.
 
-Every command is `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" <verb> ...`. Output is
-JSON on stdout; parse it. Errors go to stderr with a non-zero exit code — read them,
-don't ignore them (a `lease lost` or `idempotency key collision` error means stop and
-re-evaluate, never retry blindly).
+Invoke the CLI with the available Python 3 interpreter and native shell syntax. Examples
+use POSIX `python3`; on Windows/PowerShell read [references/windows.md](references/windows.md)
+and use `python`. Output is JSON on stdout; parse it. Errors go to stderr with a non-zero
+exit code — read them, don't ignore them (a `lease lost` or `idempotency key collision`
+error means stop and re-evaluate, never retry blindly).
 
 ## Command reference (exact signatures — don't probe `--help`)
 
@@ -465,16 +467,13 @@ focus on?"* Do not create an empty project; it leaves reviewers with nothing and
 
 Once you have the work product:
 
-1. Create the project: `start --project X --topic "…" --goal "…"` (you are `claude-1`).
+1. Create the project: `start --project X --topic "…" --goal "…"` as `<your-id>`.
 2. Snapshot the work product as v1:
-   `artifact put --project X --name spec.md --file <path> --by claude-1`
+   `artifact put --project X --name spec.md --file <path> --by <your-id>`
 3. Broadcast the request for review (one row lands per reviewer; they each respond
    independently — that's the point):
-   ```bash
-   echo "Please review spec.md@v1. Focus on <the questions you actually want answered>." \
-   | python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" post --project X --from claude-1 \
-       --to broadcast --type review_request --round 1 --artifact spec.md@v1 --body-file -
-   ```
+   `post --project X --from <your-id> --to broadcast --type review_request --round 1
+   --artifact spec.md@v1 --body "Please review spec.md@v1. Focus on <focus>."`
 4. Then **tell the user, in words, exactly what to do next** — don't just print CLI
    commands. Pick the reviewer they asked for:
    - **Codex:** *"In your Codex session say 'review collab project X', or run
@@ -509,7 +508,7 @@ reviewer gets both the stale and the current request.
 
 Drain your inbox one item at a time. For each:
 
-1. `claim --project X --agent claude-1` → returns the message plus a `claim_token`
+1. `claim --project X --agent <your-id>` → returns the message plus a `claim_token`
    and `claim_message_id`. If it returns `{"claimed": null}`, your inbox is empty.
 2. Read the **exact** artifact the message references — never "the latest". Parse the
    claimed message's `refs_json` for `artifact` (e.g. `spec.md@v3`), split into name
@@ -517,12 +516,9 @@ Drain your inbox one item at a time. For each:
    `artifact get --project X --name spec.md --version 3`. Read the `body` for what's
    asked. (If there's no artifact ref, the body is self-contained.)
 3. Produce your review, then post it **and** ack atomically with `complete`:
-   ```bash
-   echo "<your review>" | python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" complete \
-       --project X --from claude-1 --claim-message <claim_message_id> \
-       --claim-token <claim_token> --type response --round <N> \
-       --idempotency-key "claude-1:resp:<claim_message_id>:r<N>" --body-file -
-   ```
+   `complete --project X --from <your-id> --claim-message <claim_message_id>
+   --claim-token <claim_token> --type response --round <N>
+   --idempotency-key "<your-id>:resp:<claim_message_id>:r<N>" --body "<your review>"`
    `complete` defaults routing to reply-to-sender and keeps your reply in the original
    thread — don't override unless you mean to.
 4. Repeat until `claim` returns nothing.
@@ -544,11 +540,8 @@ Drain your inbox one item at a time. For each:
    user explicitly wants to converge without a sign-off, use `decide --force` and
    say so in the decision body.
 5. When no open disagreements remain (or you hit the round budget), converge:
-   ```bash
-   echo "Decision: <what was chosen and why>." | python3 "$COLLAB_BIN" \
-       --root "$COLLAB_ROOT" decide --project X --from claude-1 \
-       --thread <review_thread_id> --body-file -
-   ```
+   `decide --project X --from <your-id> --thread <review_thread_id>
+   --body "Decision: <what was chosen and why>."`
    If the loop deadlocks or a reviewer is unresponsive, **stop and surface it to the
    user** — don't loop indefinitely.
 

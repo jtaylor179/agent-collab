@@ -10,7 +10,8 @@ Steps:
    `COLLAB_ROOT` to a local-disk path, default `./.collab` in the current repository
    (the SAME path every agent uses). Determine the project name (from
    $ARGUMENTS or ask).
-2. Drain `claude-1`'s inbox: repeatedly `claim`; for each item, read the exact
+2. Resolve your host identity (`$COLLAB_AGENT`, otherwise `claude-1` in Claude or
+   `codex-1` in Codex). Drain that identity's inbox: repeatedly `claim`; for each item, read the exact
    referenced artifact version, do the work (review, reconcile a response, etc.), and
    `complete` it in-thread. Stop when `claim` returns nothing.
 3. Run `status --project <X>` and `log --project <X>` to see new activity.

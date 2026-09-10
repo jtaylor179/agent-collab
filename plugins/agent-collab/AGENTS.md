@@ -30,8 +30,9 @@ Then give them **one** of:
 ## Your identity (reviewer mode)
 
 You act as **`codex-1`** (or `copilot-1` / **`cursor-1`** / **`antigravity-1`**) unless `$COLLAB_AGENT` is set, in
-which case use that. **Set it explicitly: `export COLLAB_AGENT=codex-1` as your first
-action if it's unset** — do not inherit a `claude-1` default from a shared skill file.
+which case use that. **Set it explicitly as your first action if it is unset**
+(`export COLLAB_AGENT=codex-1` on POSIX or `$env:COLLAB_AGENT='codex-1'` in
+PowerShell) — do not inherit a `claude-1` default from a shared skill file.
 Your id MUST differ from every other participant's; the initiator is usually `claude-1`
 or `codex-1`.
 If you and another agent share an id, nothing routes to you and "check"/"wait" always
@@ -59,9 +60,10 @@ The bus is a single-file Python CLI bundled with this plugin at
   (empty) bus.
 - `COLLAB_AGENT` = `codex-1` (recommended: `export COLLAB_AGENT=codex-1` once).
 
-Every command is `python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" <verb> ...`, JSON on
-stdout. On a `lease lost` or `idempotency key collision` error, stop and re-evaluate;
-never retry blindly.
+Invoke every command with the available Python 3 interpreter and native shell syntax
+(`python3` on POSIX; usually `python` on Windows), passing `--root "$COLLAB_ROOT"`
+or its PowerShell equivalent. Output is JSON. On a `lease lost` or `idempotency key
+collision` error, stop and re-evaluate; never retry blindly.
 
 ## Orient first
 
@@ -131,6 +133,9 @@ collab-watch.sh cursor X /path/to/repo
 # Antigravity:
 collab-watch.sh antigravity X /path/to/repo
 ```
+
+On native Windows, prefer `python collab-watch.py codex X C:\path\to\repo`; the
+launcher lives beside `collab.py` and does not require Bash.
 
 In that mode the bus feeds you each claimed message (instructions + the message + the
 exact artifact content) on stdin. The watcher instructions follow the message type:

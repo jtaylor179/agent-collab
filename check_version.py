@@ -48,9 +48,7 @@ def collect():
     return versions
 
 
-REBUILD_HINT = (
-    "  (cd plugins/agent-collab && zip -r /tmp/agent-collab.plugin . "
-    "-x '*/__pycache__/*') && cp /tmp/agent-collab.plugin dist/agent-collab.plugin")
+REBUILD_HINT = "  python build_plugin.py"
 
 
 def _is_noise(rel):

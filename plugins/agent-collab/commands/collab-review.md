@@ -3,7 +3,8 @@ description: Start a collab review of a file in one step (create project, snapsh
 ---
 
 The user wants to put a specific file up for multi-agent review in one move. Use the
-`agent-collab` skill, acting as `claude-1` (or `$COLLAB_AGENT`).
+`agent-collab` skill. Resolve the host identity first: `$COLLAB_AGENT` when set,
+otherwise `claude-1` in Claude or `codex-1` in Codex.
 
 $ARGUMENTS should contain a file path and optionally a project name and focus. If no
 file path is present, STOP and ask the user which file to review and what to focus on —

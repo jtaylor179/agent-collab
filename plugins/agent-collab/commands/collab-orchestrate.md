@@ -11,7 +11,7 @@ Setup:
 
 1. `COLLAB_BIN=${CLAUDE_PLUGIN_ROOT}/skills/agent-collab/bin/collab.py`, `COLLAB_ROOT`
    (local-disk, default `./.collab` in the current repository). Project from $ARGUMENTS or ask. Your identity
-   `$COLLAB_AGENT` (else `claude-1`).
+   is `$COLLAB_AGENT` when set, otherwise `claude-1` in Claude or `codex-1` in Codex.
 2. Start the plan as the orchestrator (`start --project X --role orchestrator
    [--accept-policy any|all|final:<id>]`) if it's new. Register participants with DISTINCT
    ids and the right roles:
