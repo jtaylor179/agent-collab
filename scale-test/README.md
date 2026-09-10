@@ -162,14 +162,27 @@ Ranked by impact on cost and latency.
    The adapter now captures the answer and exits non-zero when it is blank, releasing the
    message for redelivery instead.
 
-3. **`agy` is unreliable headless — measure before you staff it.** On repeated identical
-   prompts in the same directory it produced an answer roughly **one run in three**; the
-   rest hit the auto-denied tool path. That is a far bigger obstacle to using Antigravity
-   as a worker than the adapter bug was, and before the v0.4.17 fix every one of those
-   failures was silently acked as an empty review. With the fix they surface as failures
-   and `--max-deliveries` will stall them, which is correct but still ~1/3 throughput.
-   Adding an `permissions.allow` allow-rule in agy's `settings.json` is the likely remedy;
-   untested here.
+3. ~~**`agy` answers only about one headless run in three.**~~ **Resolved — it was two
+   separate causes stacked, neither of them flakiness.** Now **3/3**.
+   *Cause one:* tool permissions were auto-denied headless. Fixed outside the repo, by
+   adding to `~/.gemini/antigravity-cli/settings.json`:
+   ```json
+   "permissions": { "allow": ["command(*)", "read_url(*)"] }
+   ```
+   Note the schema is **exact-match command strings** (the pre-existing grants look like
+   `command(python --version)`), so there is no narrow rule for commands you cannot predict
+   — a wildcard is the only option, and it lets a bus-driven agent run arbitrary shell.
+   Weigh that before copying it. `--sandbox` does **not** substitute, and listing the repo
+   in `trustedWorkspaces` does not either; trust and tool permission are separate gates.
+   *Cause two, which only became visible once the denials stopped:* with tools actually
+   running, these reviews take **279s / 426s / 346s** against agy's `--print-timeout`
+   default of **300s**. A mean of ~350s straddling a 300s cutoff is exactly what produced
+   the "one in three" figure — the runs that happened to finish under five minutes passed.
+   Fixed in v0.4.18 by defaulting the adapter to `20m` (`ANTIGRAVITY_PRINT_TIMEOUT`).
+   The lesson generalizes: **a pass rate near 1/N is worth reading as a threshold effect
+   before you call it flakiness.** Also note the throughput cost — granting `command(*)`
+   makes agy explore with shell on tasks that do not need it, which is what pushed these
+   runs past five minutes in the first place.
 
 4. **No tier escalation.** `collab retry --message M --agent A` redelivers to the *same*
    recipient — there is no cheap→smart handoff. This is the single biggest cost lever and
