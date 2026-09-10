@@ -1,0 +1,7 @@
+# All generated: `harness.py seed` rebuilds workspace/ deterministically, and the
+# rest are run artifacts. Committing them would let a stale impl.py score as a pass.
+workspace/
+probe-runs/
+results/
+logs/
+__pycache__/
