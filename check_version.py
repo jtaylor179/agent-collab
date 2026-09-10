@@ -56,6 +56,20 @@ def _is_noise(rel):
     return "__pycache__" in parts or parts[-1] in (".DS_Store",) or rel.endswith(".pyc")
 
 
+def _comparable(data):
+    """A line-ending-insensitive view of text; binaries still compare byte-exact.
+
+    A checkout under core.autocrlf yields CRLF while dist/ was zipped from an LF
+    tree (or the reverse), so a raw byte compare flagged files nobody had touched --
+    enough to block sync.sh on a freshly merged checkout. Normalizing keeps the
+    guard honest about *content*: a real edit still differs, a checkout artifact
+    does not. NUL means binary, where every byte is significant.
+    """
+    if b"\x00" in data:
+        return data
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def content_drift():
     """Compare every plugin source file against its copy inside dist/.
 
@@ -86,7 +100,7 @@ def content_drift():
                 problems.append(f"missing from dist: {rel}")
                 continue
             with open(full, "rb") as f:
-                if f.read() != packaged[key]:
+                if _comparable(f.read()) != _comparable(packaged[key]):
                     problems.append(f"stale in dist:    {rel}")
     for key in packaged:
         if key.replace("/", os.sep) not in on_disk:

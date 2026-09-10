@@ -1226,6 +1226,34 @@ class TestVersionConsistency(unittest.TestCase):
         self.assertEqual(len(set(versions.values())), 1, versions)
         self.assertEqual(module.content_drift(), [])
 
+    def test_release_guard_ignores_line_endings_but_not_content(self):
+        """A CRLF checkout must not read as stale code.
+
+        core.autocrlf hands back CRLF while dist/ was zipped from an LF tree, which
+        made the guard flag seven untouched files on a freshly merged checkout and
+        blocked sync. Normalizing must not blunt the check it exists for.
+        """
+        import importlib.util
+
+        path = os.path.join(REPO_ROOT, "check_version.py")
+        if not os.path.exists(path):
+            self.skipTest("release guard not present")
+        spec = importlib.util.spec_from_file_location("agent_collab_cv_eol", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        lf = b"def f():\n    return 1\n"
+        self.assertEqual(module._comparable(lf),
+                         module._comparable(b"def f():\r\n    return 1\r\n"))
+        self.assertEqual(module._comparable(lf),
+                         module._comparable(b"def f():\r    return 1\r"))
+        # A real edit still differs...
+        self.assertNotEqual(module._comparable(lf),
+                            module._comparable(b"def f():\r\n    return 2\r\n"))
+        # ...and binaries stay byte-exact, where 0x0d is data, not a line ending.
+        self.assertNotEqual(module._comparable(b"\x00\x0d\x0a"),
+                            module._comparable(b"\x00\x0a"))
+
 
 class TestPresenceAndInbox(Base):
     """Phase-4 ergonomics: presence classification, directed-message footgun warnings,
