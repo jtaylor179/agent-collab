@@ -2856,6 +2856,11 @@ class TestPythonWatchLauncher(unittest.TestCase):
         marker = command.index("--exec")
         self.assertEqual(command[marker + 1], sys.executable)
         self.assertTrue(command[marker + 2].endswith("cursor-exec.py"))
+        # Guards the v0.4.14 merge regression: the launcher pointed at an adapter
+        # that c790457 had deleted, so the Cursor watcher died on startup.
+        self.assertTrue(
+            os.path.isfile(command[marker + 2]),
+            f"launcher resolves a missing adapter: {command[marker + 2]}")
 
     def test_missing_repository_fails_before_watcher_start(self):
         result = self._run("codex", repo=os.path.join(self.tmp, "missing"))
@@ -3175,6 +3180,125 @@ class TestCursorExecAdapter(unittest.TestCase):
         })
         self.assertEqual(out.returncode, 1)
         self.assertIn("Cursor CLI not found", out.stderr)
+
+
+class TestCursorExecPythonAdapter(unittest.TestCase):
+    """collab-watch.py runs the Python adapter on every platform, so its contract
+    is asserted here without a POSIX shell or a real Cursor binary. Mirrors
+    TestCursorExecAdapter above; the two adapters must stay behaviourally identical."""
+
+    ADAPTER = os.path.join(PLUGIN_BIN, "cursor-exec.py")
+    CURSOR_ENV = (
+        "CURSOR_BIN", "CURSOR_MODEL", "CURSOR_READONLY",
+        "CURSOR_AGENT_MODE", "CURSOR_API_KEY",
+    )
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("cursor_exec", self.ADAPTER)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def _build(self, env=None, extra_args=(), prompt="review payload"):
+        """build_command() under a fully controlled environment."""
+        with mock.patch.dict(os.environ, env or {}, clear=True):
+            return self.mod.build_command("agent", list(extra_args), prompt, "/repo")
+
+    def _invoke(self, env_overrides=None, extra_args=None, stdin="review payload"):
+        env = dict(os.environ)
+        for key in self.CURSOR_ENV:
+            env.pop(key, None)
+        env.update(env_overrides or {})
+        return subprocess.run(
+            [sys.executable, self.ADAPTER, *(extra_args or [])],
+            input=stdin, capture_output=True, text=True, env=env, timeout=30)
+
+    def test_defaults_to_plan_mode_composer_and_text_print(self):
+        args = self._build()
+        self.assertEqual(args[0], "agent")
+        self.assertEqual(args[1], "--print")
+        self.assertEqual(args[args.index("--output-format") + 1], "text")
+        self.assertIn("--trust", args)
+        self.assertEqual(args[args.index("--workspace") + 1], "/repo")
+        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        self.assertEqual(args[args.index("--model") + 1], "composer-2.5")
+        self.assertNotIn("--force", args)
+        self.assertEqual(args[-1], "review payload")
+
+    def test_model_is_overridable(self):
+        args = self._build({"CURSOR_MODEL": "gpt-5"})
+        self.assertEqual(args[args.index("--model") + 1], "gpt-5")
+
+    def test_friendly_model_names_map_to_cli_ids(self):
+        cases = {
+            "grok 4.6": "cursor-grok-4.6-high",
+            "Grok 4.6": "cursor-grok-4.6-high",
+            "grok-4.6": "cursor-grok-4.6-high",
+            "grok 4.6 fast": "cursor-grok-4.6-high-fast",
+            "grok 4.6 extra high": "cursor-grok-4.6-xhigh",
+            "composer 2.5": "composer-2.5",
+            "composer 2.5 fast": "composer-2.5-fast",
+            "cursor-grok-4.6-high": "cursor-grok-4.6-high",
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                args = self._build({"CURSOR_MODEL": name})
+                self.assertEqual(args[args.index("--model") + 1], expected)
+
+    def test_edit_mode_adds_force_and_drops_plan(self):
+        args = self._build({"CURSOR_READONLY": "0"})
+        self.assertIn("--force", args)
+        self.assertNotIn("--mode", args)
+
+    def test_agent_mode_override_can_select_ask(self):
+        args = self._build({"CURSOR_AGENT_MODE": "ask"})
+        self.assertEqual(args[args.index("--mode") + 1], "ask")
+        self.assertNotIn("--force", args)
+
+    def test_agent_mode_agent_drops_both_plan_and_force(self):
+        args = self._build({"CURSOR_AGENT_MODE": "agent"})
+        self.assertNotIn("--mode", args)
+        self.assertNotIn("--force", args)
+
+    def test_invalid_agent_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._build({"CURSOR_AGENT_MODE": "yolo"})
+
+    def test_extra_args_are_forwarded_ahead_of_the_prompt(self):
+        args = self._build(extra_args=("--include-untracked",))
+        self.assertEqual(args[-2], "--include-untracked")
+        self.assertEqual(args[-1], "review payload")
+
+    def test_cursor_bin_wins_over_path_resolution(self):
+        with mock.patch.dict(os.environ, {"CURSOR_BIN": "/custom/agent"}, clear=True):
+            self.assertEqual(self.mod._resolve_agent(), "/custom/agent")
+
+    def test_empty_stdin_fails_closed(self):
+        # CURSOR_BIN keeps binary resolution deterministic; stdin is read after it.
+        out = self._invoke({"CURSOR_BIN": sys.executable}, stdin="")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("empty stdin", out.stderr)
+
+    def test_missing_binary_fails_before_prompt(self):
+        with tempfile.TemporaryDirectory(prefix="cursor_py_nobin_") as empty:
+            out = self._invoke({"PATH": empty, "HOME": empty, "USERPROFILE": empty})
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("Cursor CLI not found", out.stderr)
+
+    def test_preflight_without_binary_reports_nothing_claimed(self):
+        with tempfile.TemporaryDirectory(prefix="cursor_py_nobin_") as empty:
+            out = self._invoke(
+                {"PATH": empty, "HOME": empty, "USERPROFILE": empty},
+                extra_args=["--preflight"], stdin="")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("Cursor CLI is unavailable on PATH", out.stderr)
+        self.assertIn("No collab message was claimed", out.stderr)
+
+    def test_adapter_referenced_by_the_launcher_exists(self):
+        self.assertTrue(
+            os.path.isfile(self.ADAPTER),
+            "collab-watch.py resolves cursor-1 to this file; it must ship with the skill")
 
 
 @unittest.skipIf(os.name == "nt", "Copilot shell adapter requires POSIX")
