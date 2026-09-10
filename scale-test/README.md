@@ -144,34 +144,54 @@ Ranked by impact on cost and latency.
    failed *open*, which is why nobody noticed.
    Read-only duty now uses `--mode ask`, verified equally read-only against a sandbox
    (creates no files, overwrites none, while `CURSOR_READONLY=0` does write).
-   **Still open:** empty adapter output is not itself treated as a handler failure, so a
-   different adapter could reintroduce the same silent loss. `collab watch
+   **Still open:** `cursor-exec` does not itself treat empty output as a handler failure,
+   so another trigger could reintroduce the silent loss. `collab watch
    --output-admission-argv` can enforce non-empty output today, but it is opt-in and
-   nothing points you at it. `antigravity-exec.sh` has the identical
-   `ANTIGRAVITY_READONLY=1 → --mode plan` shape and is probably affected; it was left
-   alone rather than changed untested, since `agy` was not reachable here.
+   nothing points you at it.
 
-2. **No tier escalation.** `collab retry --message M --agent A` redelivers to the *same*
+2. **`antigravity-exec.sh` had the same fail-open hole for a different reason.**
+   **Fixed in v0.4.17.** The earlier guess in this file — that it shared Cursor's
+   plan-mode defect — was wrong: `agy` fails *identically with and without* `--mode plan`,
+   and it has no `ask` mode to switch to (`--mode` accepts only `accept-edits` and `plan`),
+   so changing the mode would have been a wrong fix for a misdiagnosed cause.
+   What actually happens is that `agy` exits **0 with empty stdout** when a tool permission
+   is auto-denied in headless mode — even with `--dangerously-skip-permissions`, which the
+   adapter already passes and which agy's own message then recommends. Measured: rc=0,
+   stdout 0 bytes, stderr 301 bytes. The explanation lands on stderr, which the watcher
+   never reads as the answer, so it acked an empty review.
+   The adapter now captures the answer and exits non-zero when it is blank, releasing the
+   message for redelivery instead.
+
+3. **`agy` is unreliable headless — measure before you staff it.** On repeated identical
+   prompts in the same directory it produced an answer roughly **one run in three**; the
+   rest hit the auto-denied tool path. That is a far bigger obstacle to using Antigravity
+   as a worker than the adapter bug was, and before the v0.4.17 fix every one of those
+   failures was silently acked as an empty review. With the fix they surface as failures
+   and `--max-deliveries` will stall them, which is correct but still ~1/3 throughput.
+   Adding an `permissions.allow` allow-rule in agy's `settings.json` is the likely remedy;
+   untested here.
+
+4. **No tier escalation.** `collab retry --message M --agent A` redelivers to the *same*
    recipient — there is no cheap→smart handoff. This is the single biggest cost lever and
    it has to be scripted outside the bus today. Suggested: `collab retry --to <agent>`, or
    `collab watch --escalate-to <agent>` so a stalled message re-queues addressed to a
    higher tier automatically.
 
-3. **No per-task telemetry.** The bus records messages but not claim→complete duration or
+5. **No per-task telemetry.** The bus records messages but not claim→complete duration or
    token counts, so cost-per-band has to be reconstructed from provider dashboards. Suggested:
    stamp wall-clock duration on `complete`, and let adapters report token counts. Without it,
    every routing decision here is inference rather than measurement.
 
-4. **`collab-watch.py` hardcodes one identity and one model per tool.** Its `ALIASES` table
+6. **`collab-watch.py` hardcodes one identity and one model per tool.** Its `ALIASES` table
    maps five names to five fixed ids, and `_exec_argv` pins the model — so a tiered fleet
    must bypass the launcher entirely and call `collab watch --agent <id> --exec ...`, which
    is what `fleet.ps1` does. Suggested: accept a roster file, or
    `collab-watch.py cursor P repo --as cursor-grok --model "grok 4.6"`.
 
-5. **Copilot and Antigravity need Git Bash/WSL on Windows**, removing two roster rows on a
+7. **Copilot and Antigravity need Git Bash/WSL on Windows**, removing two roster rows on a
    Windows host. Same class of gap as the Cursor watcher break — the fix is the same shape:
    a Python adapter beside the shell one.
 
-6. **`--poll-interval` defaults to 2.0s**, so mean claim latency is ~1s per task. Irrelevant
+8. **`--poll-interval` defaults to 2.0s**, so mean claim latency is ~1s per task. Irrelevant
    for long tasks, material when tasks are short and numerous. Worth dropping to 0.25–0.5s
    for scale runs; the bus is SQLite on local disk and can take it.

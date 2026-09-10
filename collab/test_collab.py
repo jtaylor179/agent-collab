@@ -3333,6 +3333,76 @@ class TestCursorExecPythonAdapter(unittest.TestCase):
             "collab-watch.py resolves cursor-1 to this file; it must ship with the skill")
 
 
+@unittest.skipIf(os.name == "nt", "Antigravity shell adapter requires POSIX")
+class TestAntigravityExecAdapter(unittest.TestCase):
+    """agy exits 0 with EMPTY stdout when a headless tool permission is auto-denied,
+    explaining itself only on stderr. The watcher would read that as a successful
+    empty review and ack the task, so the adapter has to fail closed."""
+
+    ADAPTER = os.path.join(PLUGIN_BIN, "antigravity-exec.sh")
+
+    ANSWERS = ("#!/usr/bin/env python3\n"
+               "print('the review text')\n")
+    SILENT_DENY = ("#!/usr/bin/env python3\n"
+                   "import sys\n"
+                   "print('jetski: no output produced -- a tool required the "
+                   "\"command\" permission', file=sys.stderr)\n")
+    ECHO_ARGV = ("#!/usr/bin/env python3\n"
+                 "import json, sys\n"
+                 "print(json.dumps(sys.argv[1:]))\n")
+
+    def _invoke(self, fake_body, stdin="review this", env_overrides=None):
+        with tempfile.TemporaryDirectory(prefix="agy_adapter_") as tmp:
+            fake = os.path.join(tmp, "agy")
+            with open(fake, "w", encoding="utf-8") as fh:
+                fh.write(fake_body)
+            os.chmod(fake, 0o755)
+            env = os.environ.copy()
+            env["AGY_BIN"] = fake
+            for key in ("ANTIGRAVITY_MODEL", "AGY_MODEL",
+                        "ANTIGRAVITY_READONLY", "AGY_READONLY"):
+                env.pop(key, None)
+            env.update(env_overrides or {})
+            return subprocess.run(
+                [self.ADAPTER], input=stdin, capture_output=True, text=True,
+                env=env, timeout=20)
+
+    def test_auto_denied_permission_fails_closed(self):
+        out = self._invoke(self.SILENT_DENY)
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(out.stdout.strip(), "")
+        self.assertIn("produced no answer", out.stderr)
+        self.assertIn("No collab message was claimed", out.stderr)
+
+    def test_whitespace_only_answer_also_fails_closed(self):
+        out = self._invoke("#!/usr/bin/env python3\nprint('  \\n\\t ')\n")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("produced no answer", out.stderr)
+
+    def test_real_answer_passes_through_unchanged(self):
+        out = self._invoke(self.ANSWERS)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "the review text")
+
+    def test_empty_stdin_fails_closed(self):
+        out = self._invoke(self.ANSWERS, stdin="")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("empty stdin", out.stderr)
+
+    def test_plan_stays_the_readonly_default(self):
+        # Unlike Cursor, plan mode is NOT the bug here: agy fails identically with and
+        # without it, so the default stays put and only the fail-open hole is closed.
+        args = json.loads(self._invoke(self.ECHO_ARGV).stdout)
+        self.assertEqual(args[args.index("--mode") + 1], "plan")
+        self.assertIn("--dangerously-skip-permissions", args)
+        self.assertEqual(args[-2], "-p")
+
+    def test_edit_mode_drops_plan(self):
+        args = json.loads(
+            self._invoke(self.ECHO_ARGV, env_overrides={"ANTIGRAVITY_READONLY": "0"}).stdout)
+        self.assertNotIn("--mode", args)
+
+
 @unittest.skipIf(os.name == "nt", "Copilot shell adapter requires POSIX")
 class TestCopilotExecAdapter(unittest.TestCase):
     """Copilot starts on the preferred model/effort defaults and accepts per-run

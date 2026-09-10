@@ -33,8 +33,34 @@ if [ -n "$MODEL" ]; then
 fi
 
 prompt="$(cat)"
+if [ -z "$prompt" ]; then
+  echo "antigravity-exec: empty stdin" >&2
+  exit 2
+fi
+
+# Deliberately not exec: agy exits 0 with an EMPTY stdout when a tool permission is
+# auto-denied in headless mode -- it explains itself on stderr ("no output produced --
+# a tool required the ... permission"), which the watcher never reads as the answer.
+# Measured: rc=0, stdout 0 bytes, stderr 301 bytes, and it happens with or without
+# --mode plan, so the mode is not the cause. Left alone, the watcher posts an empty
+# review and acks the task: the work is silently lost while the queue looks healthy.
+# Capture the answer and fail closed so the message is released for redelivery instead.
 # ${arr[@]+"${arr[@]}"} = bash-3.2-safe expansion of a possibly-empty array under set -u.
-exec "$AGY_BIN" --print --dangerously-skip-permissions \
+set +e
+answer="$("$AGY_BIN" --print --dangerously-skip-permissions \
   ${readonly_args[@]+"${readonly_args[@]}"} \
   ${model_args[@]+"${model_args[@]}"} \
-  "$@" -p "$prompt"
+  "$@" -p "$prompt")"
+status=$?
+set -e
+
+if [ -z "$(printf '%s' "$answer" | tr -d '[:space:]')" ]; then
+  echo "antigravity-exec: agy produced no answer (exit $status). In headless mode a tool" >&2
+  echo "permission can be auto-denied even with --dangerously-skip-permissions; see agy's" >&2
+  echo "own message above and add an allow-rule under permissions.allow in settings.json." >&2
+  echo "No collab message was claimed." >&2
+  exit 1
+fi
+
+printf '%s\n' "$answer"
+exit "$status"
