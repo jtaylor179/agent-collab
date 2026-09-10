@@ -35,13 +35,15 @@ Review-mode steps:
    basename + date and state it rather than asking.
 3. **Round 2** (one grouped round): per selected agent — role (reviewer default;
    approver = sign-off required before `decide` converges; observer = log-only),
-   model (defaults: Codex CLI default, Copilot `claude-opus-4.8` with
+   model (defaults: Codex CLI default, Claude Code Sonnet 5 / `claude-sonnet-5`,
+   Copilot `claude-opus-4.8` with
    `gpt-5.6-terra` as the recommended alternative, Cursor Composer 2.5 /
    Grok 4.6, agy auto),
    reasoning effort (Copilot defaults to `high`; allow
    `none|minimal|low|medium|high|xhigh|max`), and access (read-only default). Register approvers/observers with
    `join --role <role>` before launching their watcher. Use the skill's
-   env-knob table (`COPILOT_MODEL`, `COPILOT_REASONING_EFFORT`, `CURSOR_MODEL`, `ANTIGRAVITY_MODEL`,
+   env-knob table (`COPILOT_MODEL`, `COPILOT_REASONING_EFFORT`, `CLAUDE_MODEL`,
+   `CURSOR_MODEL`, `ANTIGRAVITY_MODEL`,
    `COLLAB_CODEX_EXEC_ARGS`, `*_READONLY`).
 4. Execute: `review --project <name> --file <path> --focus "…"` (create + snapshot +
    broadcast in one step), `join --role observer` for observers, then onboard

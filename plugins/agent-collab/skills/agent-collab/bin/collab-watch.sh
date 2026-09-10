@@ -22,9 +22,38 @@
 # neither command is evaluated by a shell.
 # Extra Claude flags can be passed via COLLAB_CLAUDE_EXEC_ARGS; Claude always runs in
 # print mode, with non-interactive permissions, no browser, and no saved sessions.
+# Override the Claude Code model with CLAUDE_MODEL (default: claude-sonnet-5).
+# Friendly names like "sonnet 5" and "opus" are mapped to CLI ids. A --model in
+# COLLAB_CLAUDE_EXEC_ARGS wins and skips CLAUDE_MODEL.
 # Cursor uses cursor-exec.sh → `agent -p` (or `cursor-agent`). Set CURSOR_BIN to
 # pin the binary; CURSOR_MODEL and CURSOR_READONLY work like the other adapters.
 set -euo pipefail
+
+normalize_claude_model() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' _-' '-'
+}
+
+# Map product/friendly names to Claude Code --model ids. Unknown values
+# (including already-canonical ids) pass through unchanged.
+resolve_claude_model() {
+  local key
+  key="$(normalize_claude_model "${1:-}")"
+  case "$key" in
+    ""|sonnet|sonnet-5|claude-sonnet-5)
+      printf '%s\n' "claude-sonnet-5" ;;
+    opus|opus-5|claude-opus-5)
+      printf '%s\n' "claude-opus-5" ;;
+    fable|fable-5|claude-fable-5)
+      printf '%s\n' "claude-fable-5" ;;
+    haiku|haiku-4.5|claude-haiku-4-5)
+      printf '%s\n' "haiku" ;;
+    opus-4.8|claude-opus-4-8)
+      printf '%s\n' "claude-opus-4-8" ;;
+    *)
+      printf '%s\n' "$1" ;;
+  esac
+}
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HERE/collab.py"
 WRAP="$HERE/copilot-exec.sh"
@@ -51,6 +80,16 @@ case "$agent_arg" in
     if [ -n "$claude_args" ]; then
       # shellcheck disable=SC2206  # intentional simple word-splitting for env-provided flags
       claude_exec_args=($claude_args)
+    fi
+    claude_has_model=0
+    for claude_arg in ${claude_exec_args[@]+"${claude_exec_args[@]}"}; do
+      if [ "$claude_arg" = "--model" ]; then
+        claude_has_model=1
+        break
+      fi
+    done
+    if [ "$claude_has_model" -eq 0 ]; then
+      claude_exec_args+=(--model "$(resolve_claude_model "${CLAUDE_MODEL:-claude-sonnet-5}")")
     fi
     exec_argv=(claude --print --permission-mode dontAsk --no-chrome \
       --no-session-persistence ${claude_exec_args[@]+"${claude_exec_args[@]}"})

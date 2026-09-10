@@ -316,12 +316,16 @@ per agent. Defaults first.
   plausible the user wants a non-reviewer; otherwise default everyone to reviewer
   and say so.
 - **Model:** offer the default plus 1–2 known alternatives; free-text for anything
-  else. For Copilot, offer Claude Opus 4.8 (`claude-opus-4.8`, default) and GPT-5.6
-  Terra (`gpt-5.6-terra`) explicitly. For Cursor, offer Composer 2.5 (`composer-2.5`,
+  else. For Claude Code (`claude-1`), offer Sonnet 5 (`claude-sonnet-5`, default)
+  and Opus 5 (`claude-opus-5`); accept friendly names ("sonnet 5", "sonnet",
+  "opus") — `collab-watch.sh` maps them to CLI ids via `CLAUDE_MODEL`. For Copilot,
+  offer Claude Opus 4.8 (`claude-opus-4.8`, default) and GPT-5.6 Terra
+  (`gpt-5.6-terra`) explicitly. For Cursor, offer Composer 2.5 (`composer-2.5`,
   default) and Grok 4.6 (`cursor-grok-4.6-high`); accept friendly names ("grok 4.6",
   "composer 2.5", "grok 4.6 fast") — `cursor-exec.sh` maps them to CLI ids. Plumb
   the choice through the env knob when launching that agent's watcher. `agent
-  --list-models` lists every id the account can use.
+  --list-models` lists Cursor ids; Claude Code accepts aliases (`sonnet`, `opus`,
+  `fable`) or full names (`claude-sonnet-5`).
 - **Reasoning effort:** for Copilot, default to `high`; allow
   `none|minimal|low|medium|high|xhigh|max`. Plumb the choice through
   `COPILOT_REASONING_EFFORT`.
@@ -333,10 +337,26 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 | Agent | Model knob | Default model | Read-only knob (default on) |
 |---|---|---|---|
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
-| `claude-1` | `COLLAB_CLAUDE_EXEC_ARGS` — append `--model <model>` | Claude Code CLI default | Claude launcher uses its non-interactive permission mode |
+| `claude-1` | `CLAUDE_MODEL` (or `COLLAB_CLAUDE_EXEC_ARGS` `--model`) | `claude-sonnet-5` (alt: Opus 5 → `claude-opus-5`) | Claude launcher uses its non-interactive permission mode |
 | `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` |
 | `cursor-1` | `CURSOR_MODEL` | `composer-2.5` (alt: Grok 4.6 → `cursor-grok-4.6-high`) | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
+
+**Claude Code model names.** Users often say "sonnet 5" or "opus". That is valid.
+Set `CLAUDE_MODEL` to the friendly name or the CLI id — `collab-watch.sh` maps
+these before calling `claude --model`. Do not reject a friendly name, and do not
+ask the user for the hyphenated id if they already named the product.
+
+| User says | `CLAUDE_MODEL` / CLI id |
+|---|---|
+| sonnet 5 / sonnet (default) | `claude-sonnet-5` |
+| opus 5 / opus | `claude-opus-5` |
+| fable 5 / fable | `claude-fable-5` |
+| haiku | `haiku` |
+| an already-canonical id (`claude-sonnet-5`, `claude-opus-4-8`, …) | pass through |
+
+If they name some other Claude Code model, pass it through as `CLAUDE_MODEL`.
+A `--model` already present in `COLLAB_CLAUDE_EXEC_ARGS` wins over `CLAUDE_MODEL`.
 
 **Cursor model names.** Users often say "grok 4.6" or "composer 2.5". That is valid.
 Set `CURSOR_MODEL` to the friendly name or the CLI id — `cursor-exec.sh` maps
@@ -569,8 +589,9 @@ separate terminal so Claude/Codex/Copilot/Cursor/Antigravity pick up review requ
 "${COLLAB_BIN%/collab.py}/collab-watch.sh" agy          X /path/to/repo
 
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent codex-1   --exec codex exec -c service_tier=fast
-# Claude: prefer the launcher above. It runs `claude auth status` before claims;
-# `COLLAB_CLAUDE_EXEC_ARGS="--model opus"` pins an Opus review when available.
+# Claude: prefer the launcher above. It runs `claude auth status` before claims
+# and defaults to Sonnet 5. `CLAUDE_MODEL=opus` (or `sonnet 5`) maps to CLI ids;
+# `COLLAB_CLAUDE_EXEC_ARGS="--model opus"` still pins an explicit --model.
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent claude-1  --exec claude --print --permission-mode dontAsk --no-chrome --no-session-persistence
 # Copilot: use the adapter's validated non-streaming JSONL transport:
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent copilot-1 --exec "${COLLAB_BIN%/collab.py}/copilot-exec.sh" -C /path/to/repo

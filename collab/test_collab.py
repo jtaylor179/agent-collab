@@ -2857,7 +2857,8 @@ exit 0
                 "COLLAB_WATCH_LOG", "COLLAB_CLAUDE_EXEC_ARGS",
                 "COLLAB_CODEX_EXEC_ARGS", "COLLAB_CLAUDE_AUTH_PREFLIGHT",
                 "COLLAB_CURSOR_AUTH_PREFLIGHT", "CURSOR_BIN", "CURSOR_API_KEY",
-                "CURSOR_MODEL", "CURSOR_READONLY", "CURSOR_AGENT_MODE"):
+                "CURSOR_MODEL", "CURSOR_READONLY", "CURSOR_AGENT_MODE",
+                "CLAUDE_MODEL"):
             env.pop(key, None)
         env.update({
             "PATH": self.fake_bin + os.pathsep + env.get("PATH", ""),
@@ -2907,7 +2908,8 @@ exit 0
             "codex": ["codex", "exec", "-c", "service_tier=fast"],
             "claude": [
                 "claude", "--print", "--permission-mode", "dontAsk",
-                "--no-chrome", "--no-session-persistence"],
+                "--no-chrome", "--no-session-persistence",
+                "--model", "claude-sonnet-5"],
             "cursor": [os.path.join(PLUGIN_BIN, "cursor-exec.sh")],
             "agy": [os.path.join(PLUGIN_BIN, "antigravity-exec.sh")],
         }
@@ -2936,6 +2938,37 @@ exit 0
 
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertTrue(os.path.exists(self.capture))
+
+    def test_claude_friendly_model_names_map_to_cli_ids(self):
+        cases = {
+            "sonnet 5": "claude-sonnet-5",
+            "Sonnet 5": "claude-sonnet-5",
+            "sonnet": "claude-sonnet-5",
+            "claude-sonnet-5": "claude-sonnet-5",
+            "opus": "claude-opus-5",
+            "opus 5": "claude-opus-5",
+            "fable": "claude-fable-5",
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                out = self._run("claude", CLAUDE_MODEL=name)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                args = self._captured()["args"]
+                marker = args.index("--exec")
+                exec_argv = args[marker + 1:]
+                self.assertEqual(exec_argv[exec_argv.index("--model") + 1], expected)
+                self.assertEqual(exec_argv.count("--model"), 1)
+
+    def test_claude_exec_args_model_wins_over_claude_model(self):
+        out = self._run(
+            "claude",
+            CLAUDE_MODEL="sonnet 5",
+            COLLAB_CLAUDE_EXEC_ARGS="--model opus")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        args = self._captured()["args"]
+        exec_argv = args[args.index("--exec") + 1:]
+        self.assertEqual(exec_argv[exec_argv.index("--model") + 1], "opus")
+        self.assertEqual(exec_argv.count("--model"), 1)
 
     def test_missing_claude_binary_stops_before_the_bus_can_be_claimed(self):
         os.unlink(os.path.join(self.fake_bin, "claude"))

@@ -79,4 +79,4 @@ watcher daemon, live observability, and the test suite.
 python3 -m unittest collab.test_collab -v
 ```
 
-Current version: **0.4.12**
+Current version: **0.4.13**

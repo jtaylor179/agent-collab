@@ -6,7 +6,7 @@ The user wants to start the **watcher daemon** so another AI agent (Copilot, Cod
 **Cursor**, or **Antigravity / agy**) automatically picks up and answers review requests on the bus — without
 anyone copy/pasting. Use the `agent-collab` skill.
 
-`$ARGUMENTS` should contain: which agent (`copilot`, `codex`, **`cursor`**, **`antigravity`**, or **`agy`**), the
+`$ARGUMENTS` should contain: which agent (`copilot`, `codex`, **`claude`**, **`cursor`**, **`antigravity`**, or **`agy`**), the
 project name, and optionally a repo directory. Examples: `copilot context-compaction`,
 `codex my-project /path/to/repo`, **`cursor a5-phrase-level-keys /path/to/repo`**,
 **`agy my-project /path/to/repo`**.
@@ -23,6 +23,10 @@ Steps:
      (`gpt-5.6-terra` is the recommended alternative) and
      `COPILOT_REASONING_EFFORT`. The adapter uses validated non-streaming JSONL;
      for isolated exact-output jobs, set `COPILOT_CUSTOM_INSTRUCTIONS=0`.
+   - **Claude:** `claude --print` (stdin). Defaults to Sonnet 5
+     (`claude-sonnet-5`). Override with `CLAUDE_MODEL` (friendly names like
+     `sonnet 5` / `opus` map to CLI ids). Extra flags via
+     `COLLAB_CLAUDE_EXEC_ARGS`; a `--model` there wins over `CLAUDE_MODEL`.
    - **Codex:** `codex exec -c service_tier=fast` (stdin). Override with
      `COLLAB_CODEX_EXEC_ARGS`.
    - **Cursor:** `cursor-exec.sh` → Cursor CLI `agent -p` (prompt-as-arg). Requires
@@ -41,6 +45,6 @@ Steps:
    open.
 3. Report agent/project/root and how to stop it (`pkill -f "watch --project <project>"`).
 4. Optional: `COLLAB_WATCH_ARGS="--idle-exit"` to drain the queue then exit.
-4. Distinct ids: `copilot-1` / `codex-1` / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
+4. Distinct ids: `copilot-1` / `codex-1` / **`claude-1`** / **`cursor-1`** / **`antigravity-1`** — never the initiator's id.
 
 After launching, suggest `/collab-status <project>` or `log --follow`.

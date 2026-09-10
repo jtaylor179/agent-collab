@@ -60,6 +60,9 @@ when a sandboxed caller cannot see a host Claude subscription: launch the watche
 the host context that can access the login, rather than repeatedly stalling the review.
 Set `COLLAB_CLAUDE_AUTH_PREFLIGHT=0` only for a known nonstandard provider whose
 credentials cannot be reported by `claude auth status`.
+The launcher defaults to Sonnet 5 (`claude-sonnet-5`). Override with `CLAUDE_MODEL`
+(friendly names like `sonnet 5`, `opus`, and `fable` map to CLI ids). Extra flags
+go in `COLLAB_CLAUDE_EXEC_ARGS`; a `--model` already in that string wins.
 
 For Copilot, the launcher defaults to Claude Opus 4.8 (`claude-opus-4.8`) with
 reasoning effort `high`. Set `COPILOT_MODEL=gpt-5.6-terra` to start with GPT-5.6
