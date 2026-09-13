@@ -94,11 +94,7 @@ def _exec_argv(agent, here):
     if agent == "cursor-1":
         return [sys.executable, str(here / "cursor-exec.py")]
     if agent == "copilot-1":
-        if os.name == "nt":
-            raise ValueError(
-                "the Copilot watcher adapter currently requires WSL or Git Bash; "
-                "run collab-watch.sh from that environment")
-        return [str(here / "copilot-exec.sh")]
+        return [sys.executable, str(here / "copilot-exec.py")]
     if agent == "antigravity-1":
         if os.name == "nt":
             raise ValueError(

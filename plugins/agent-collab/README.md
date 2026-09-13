@@ -97,7 +97,12 @@ Native Windows/PowerShell:
 
 ```powershell
 python skills/agent-collab/bin/collab-watch.py codex A C:\path\to\repo
+python skills/agent-collab/bin/collab-watch.py copilot A C:\path\to\repo
 ```
+
+The native Copilot path keeps read-only reviews away from the live checkout by
+reproducing the current Git state in a verified disposable clone, removing links back
+to the source repository, and deleting the clone after the response is captured.
 
 Raw CLI equivalent:
 Point `BIN` at the bundled CLI using an explicit path — inside Claude it's

@@ -71,7 +71,11 @@ Terra, or use another Copilot model id. Override effort with
 jobs can set `COPILOT_CUSTOM_INSTRUCTIONS=0`; repository instructions otherwise
 remain enabled for code work. The adapter owns `--output-format json --stream off`,
 fails closed on malformed or ambiguous JSONL, and never trims or repairs the
-assistant content.
+assistant content. The launcher selects the native `copilot-exec.py` adapter. On
+Windows, `COPILOT_READONLY=1` reproduces committed, staged, unstaged, and Git-visible
+untracked state in a verified disposable clone, removes its remote and object
+alternates, scrubs inherited paths back to the live Git state, and deletes the clone
+after Copilot exits. macOS keeps the additional OS-enforced `sandbox-exec` boundary.
 
 For Cursor, install Cursor CLI (`curl https://cursor.com/install -fsS | bash`) so
 `agent` or `cursor-agent` is on PATH, then `agent login` (or set `CURSOR_API_KEY`).
@@ -170,7 +174,10 @@ in that chat meanwhile — for true set-and-forget, prefer the watcher above.
 ## Sandboxing (recommended)
 
 A reviewer process can write anywhere its OS permissions allow — the protocol only
-*asks* it to write the bus. For real isolation, run each watcher with a restricted
+*asks* it to write the bus. The Copilot launcher protects the source checkout with its
+disposable snapshot (plus `sandbox-exec` on macOS), but a container or OS boundary is
+still stronger isolation against arbitrary filesystem discovery. For that level of
+isolation, run each watcher with a restricted
 working directory or a read-only mount of the work product (e.g. inside a container or
 with OS-level filesystem scoping), so a misbehaving agent can't touch the initiator's
 repo.

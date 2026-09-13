@@ -134,8 +134,10 @@ collab-watch.sh cursor X /path/to/repo
 collab-watch.sh antigravity X /path/to/repo
 ```
 
-On native Windows, prefer `python collab-watch.py codex X C:\path\to\repo`; the
-launcher lives beside `collab.py` and does not require Bash.
+On native Windows, prefer `python collab-watch.py <agent> X C:\path\to\repo`; the
+launcher lives beside `collab.py` and does not require Bash for Codex, Copilot, or
+Cursor. Copilot's default read-only mode runs in a verified disposable Git clone, so
+reviewer writes do not affect the live checkout supplied to the watcher.
 
 In that mode the bus feeds you each claimed message (instructions + the message + the
 exact artifact content) on stdin. The watcher instructions follow the message type:

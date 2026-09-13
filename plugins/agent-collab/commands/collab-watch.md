@@ -19,8 +19,10 @@ Steps:
    `collab-watch.sh <agent> <project> [repo-dir]` on POSIX, or
    `python collab-watch.py <agent> <project> [repo-dir]` on any platform.
    (defaults: `COLLAB_ROOT=<repo-dir>/.collab`, repo-dir = current dir).
-   - **Copilot:** `copilot-exec.sh` adapter, model `claude-opus-4.8`, reasoning
-     effort `high`, read-only by default. Override with `COPILOT_MODEL`
+   - **Copilot:** native `copilot-exec.py` adapter (with `copilot-exec.sh` available
+     for direct POSIX use), model `claude-opus-4.8`, reasoning effort `high`,
+     read-only by default. On Windows, read-only mode runs in a verified disposable
+     Git clone rather than rejecting the launch. Override with `COPILOT_MODEL`
      (`gpt-5.6-terra` is the recommended alternative) and
      `COPILOT_REASONING_EFFORT`. The adapter uses validated non-streaming JSONL;
      for isolated exact-output jobs, set `COPILOT_CUSTOM_INSTRUCTIONS=0`.

@@ -59,6 +59,10 @@ every call:
   explicitly only when collaborators intentionally work from different repository roots.
   Avoid a mounted/synced/network folder: SQLite needs file locking, and the CLI will say
   so clearly if the path can't support it.
+- Copilot watcher adapter: `copilot-exec.py` beside `collab.py` (the launcher uses
+  this natively on every platform; `copilot-exec.sh` remains available for direct
+  POSIX use). Windows read-only mode uses a verified disposable Git clone and never
+  passes the live worktree path to Copilot.
 - Cursor watcher adapter: `cursor-exec.sh` beside `collab.py` (requires Cursor CLI
   `agent` or `cursor-agent` on PATH, or `CURSOR_BIN`; `agent login` or
   `CURSOR_API_KEY`). See `references/cursor-start.md`.
@@ -340,7 +344,7 @@ Per-agent knobs (set in the watcher's environment; defaults apply when unset):
 |---|---|---|---|
 | `codex-1` | `COLLAB_CODEX_EXEC_ARGS` — append `-m <model>` (keep `-c service_tier=fast`) | Codex CLI default | codex exec sandbox (default read-only) |
 | `claude-1` | `CLAUDE_MODEL` (or `COLLAB_CLAUDE_EXEC_ARGS` `--model`) | `claude-sonnet-5` (alt: Opus 5 → `claude-opus-5`) | Claude launcher uses its non-interactive permission mode |
-| `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` |
+| `copilot-1` | `COPILOT_MODEL` | `claude-opus-4.8` (alternative: `gpt-5.6-terra`) | `COPILOT_READONLY` (verified disposable snapshot on Windows) |
 | `cursor-1` | `CURSOR_MODEL` | `composer-2.5` (alt: Grok 4.6 → `cursor-grok-4.6-high`) | `CURSOR_READONLY` |
 | `antigravity-1` | `ANTIGRAVITY_MODEL` (alias `AGY_MODEL`) | agy picks | `ANTIGRAVITY_READONLY` (`--mode plan`) |
 
@@ -593,6 +597,9 @@ python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent cursor-1 -
 # Antigravity: agy --print via antigravity-exec.sh (prompt-as-arg, like Copilot):
 python3 "$COLLAB_BIN" --root "$COLLAB_ROOT" watch --project X --agent antigravity-1 --exec "${COLLAB_BIN%/collab.py}/antigravity-exec.sh"
 ```
+
+On native Windows, use `python collab-watch.py copilot X C:\path\to\repo`; the
+launcher selects `copilot-exec.py`, so Bash and `sandbox-exec` are not required.
 
 Claude's launcher and the direct `--exec claude ...` form both preflight
 `claude auth status` before joining or claiming work. If the caller is sandboxed and

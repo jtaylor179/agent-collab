@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fingerprint the ordinary Git state copied by copilot-exec.sh.
+"""Fingerprint the ordinary Git state copied by the Copilot watcher adapters.
 
 The fingerprint is deliberately limited to the state that the adapter can
 faithfully replay: HEAD, staged and unstaged binary diffs, and Git-visible
